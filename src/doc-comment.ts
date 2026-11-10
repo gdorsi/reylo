@@ -25,7 +25,7 @@ export function leadingComment(sql: string, dialect?: Dialect): Leading {
     const ch = sql[at];
     const next = sql[at + 1];
     const blankBefore = (ws.match(/\n/g)?.length ?? 0) > 1;
-    const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && dialect === "mysql");
+    const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && (dialect === "mysql" || (dialect === "clickhouse" && (next === " " || next === "!"))));
     if (lineComment) {
       const stop = sql.indexOf("\n", at);
       const text = sql.slice(at + (ch === "#" ? 1 : 2), stop === -1 ? sql.length : stop);

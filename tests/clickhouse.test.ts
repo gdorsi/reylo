@@ -1,12 +1,15 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Session, type Outcome } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
-import { defineQuery } from "../src/index.ts";
+import { analyze as describe, defineQuery } from "../src/index.ts";
+import { leadingComment } from "../src/doc-comment.ts";
+import { nativeBinary } from "../src/native.ts";
 import { clickhouseParam } from "../src/decode-clickhouse.ts";
 import { dialectOf } from "../src/project.ts";
 import type { EngineType } from "../src/engine-type.ts";
@@ -322,4 +325,19 @@ test("ClickHouse: a query's JSON Schema describes a Map as an object and an arra
     amount: { type: "string", format: "decimal" },
     big: { type: "integer", format: "int64" },
   });
+});
+
+test("ClickHouse: analyze() gives a statement's descriptor, as reylo analyze prints it", { skip }, async () => {
+  const sql = "-- An event's tags.\n# Its second line.\nselect id, tags from events where id = {id:UInt64} limit 1";
+  const descriptor = await describe({ url: db.url, sql });
+  assert.equal(descriptor.dialect.name, "clickhouse");
+  assert.match(descriptor.dialect.version ?? "", /^\d+\.\d+/);
+  assert.equal(descriptor.sql, "-- An event's tags.\n# Its second line.\nselect id, tags from events where id = {p1:UInt64} limit 1");
+  assert.deepEqual(descriptor.params, [{ name: "id", type: { kind: "integer", bits: 64, unsigned: true, label: "UInt64" } }]);
+  assert.equal(descriptor.result.kind === "rows" && descriptor.result.cardinality, "at_most_one");
+  const run = spawnSync(nativeBinary(), ["analyze", "--url", db.url, "--sql", sql], { cwd: root, encoding: "utf8" });
+  const { file: _, ...printed } = JSON.parse(run.stdout.trim().split("\n")[0]!);
+  assert.deepEqual(descriptor, printed);
+  // The comment that opens the statement is its documentation, a `# ` line of it too.
+  assert.deepEqual(leadingComment(sql, "clickhouse").prose, "An event's tags.\nIts second line.");
 });

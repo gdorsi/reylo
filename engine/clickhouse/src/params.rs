@@ -116,9 +116,22 @@ pub fn marked(word: &str) -> Option<usize> {
     word.strip_prefix("reylo_parameter_")?.parse().ok()
 }
 
-/// The statement as the tree is read from it: each parameter as a word that names its number.
+/// The statement as the tree is read from it: each parameter as a word that names its number,
+/// and each comment as the space it is, since the tree's reader takes `# ` for no comment and
+/// nests no block comment.
 pub fn parsable(sql: &str, lexed: &Lexed) -> Rewritten {
-    lex::rewrite_with(sql, lexed, Target::Dollar, &|name, _| marker(number(lexed, name)))
+    let mut text = sql.as_bytes().to_vec();
+    for &(start, end) in &lexed.opaque {
+        if matches!(&sql.as_bytes()[start..end], [b'-', b'-', ..] | [b'#', ..] | [b'/', b'*', ..]) {
+            for byte in &mut text[start..end] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    let text = String::from_utf8(text).expect("a comment's bytes are spaces");
+    lex::rewrite_with(&text, lexed, Target::Dollar, &|name, _| marker(number(lexed, name)))
 }
 
 #[cfg(test)]
@@ -156,5 +169,9 @@ mod tests {
         assert_eq!(&sql[described.to_original(at)..][..5], "tag =");
         assert_eq!(parsable(sql, &lexed).sql, "select id from events where id = reylo_parameter_1::UInt64 and tag = reylo_parameter_2 and at > reylo_parameter_3::DateTime('UTC')");
         assert_eq!(marked("reylo_parameter_12"), Some(12));
+        // A comment is space there, a `# ` line and a nested block too, and no string is.
+        let sql = "-- é\n# two\nselect '# no', {a:UInt8} /* a /* b */ c */ from t #! end";
+        let lexed = lex::lex(sql, Dialect::Clickhouse).unwrap();
+        assert_eq!(parsable(sql, &lexed).sql, "     \n     \nselect '# no', reylo_parameter_1                   from t       ");
     }
 }
