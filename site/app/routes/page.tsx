@@ -18,7 +18,7 @@ import { source } from '@/lib/source';
  * The h2s whose h3s stay out of each page's table of contents, so that the whole table fits
  * on one screen (a window 900px tall, at Fumadocs' spacing); the headings stay on the page,
  * with their anchors. On each dialect page (content/docs/<dialect>.mdx, one skeleton
- * for all four): the h3s of Parameters and of Drivers, one per driver, which leaves Data types'
+ * for all five): the h3s of Parameters and of Drivers, one per driver, which leaves Data types'
  * h3s, the reason a reader lands there, in the table.
  */
 const FOLD: Record<string, readonly string[]> = {
@@ -28,9 +28,10 @@ const FOLD: Record<string, readonly string[]> = {
   mysql: ['#parameters', '#drivers'],
   sqlite: ['#parameters', '#drivers'],
   duckdb: ['#parameters', '#drivers'],
+  clickhouse: ['#parameters', '#drivers'],
 };
 
-const DIALECT_PAGES = new Set(['postgres', 'mysql', 'sqlite', 'duckdb']);
+const DIALECT_PAGES = new Set(['postgres', 'mysql', 'sqlite', 'duckdb', 'clickhouse']);
 
 /** The pages with no table of contents, by slug, each with the width of its column, which takes the right column's room: a page whose whole point is one wide table. */
 const CENTERED: Record<string, string> = {

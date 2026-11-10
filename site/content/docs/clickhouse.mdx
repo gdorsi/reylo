@@ -1,0 +1,358 @@
+---
+title: ClickHouse
+description: How Reylo types SQL queries on ClickHouse. The TypeScript type of each column, null values, cardinality, parameters, drivers and limits.
+---
+
+<p className="dk-subheader">How Reylo types queries on ClickHouse</p>
+
+[Reylo](/) lets you import `.sql` files into TypeScript, with every query typed from your live database. This page covers how it types and runs queries on ClickHouse: column types, null values, cardinality, parameters and drivers.
+
+<Callout title="Preview">
+
+ClickHouse support is a preview: the types Reylo infers on ClickHouse, and the values `.run()` returns for them, may still change in a minor release.
+
+</Callout>
+
+| | |
+| --- | --- |
+| ClickHouse versions | 26.8, the version Reylo is tested on |
+| Connection | A `clickhouse://` URL in `DATABASE_URL` or [`direct_url`](/configuration#direct_url), as `clickhouse://default:secret@localhost:8123/app`: ClickHouse's HTTP interface, on port 8123 unless the URL names another. A `clickhouses://` URL connects over HTTPS, on port 8443. The URL's query sets settings for the type check, as `?join_use_nulls=1` |
+| Drivers | `@clickhouse/client` and `@clickhouse/client-web` ([Drivers](#drivers)) |
+| Type checking | The server describes each query, with `DESCRIBE`, and reads no row for it. A statement that returns no rows is checked with `EXPLAIN AST`, and never run |
+
+<Details summary="View the schema behind the examples" id="schema">
+
+```sql file="schema.sql" dialect="clickhouse"
+create table teams (
+  id UInt32,
+  name String
+) engine = MergeTree order by id;
+
+create table users (
+  id UInt64,
+  name String,
+  email Nullable(String),
+  team_id UInt32,
+  plan Enum8('free' = 1, 'pro' = 2),
+  created_at DateTime64(3, 'UTC')
+) engine = MergeTree order by id;
+```
+
+```sql file="schema.sql" dialect="clickhouse"
+create table events (
+  id UInt64,
+  user_id UInt64,
+  kind LowCardinality(String),
+  tags Array(String),
+  props Map(String, String),
+  place Tuple(lat Float64, lon Float64),
+  total Nullable(Decimal(12, 2)),
+  doc JSON,
+  at DateTime('UTC'),
+  day Date
+) engine = MergeTree order by (user_id, at);
+```
+
+</Details>
+
+## Data types
+
+ClickHouse reports the exact type of every column, and `.run()` returns one value for each type:
+
+| ClickHouse type | TypeScript | The value `.run()` returns |
+| --- | --- | --- |
+| `Bool` | `boolean` | `true` |
+| `Int8`, `Int16`, `Int32`, `UInt8`, `UInt16`, `UInt32` | `number` | `42` |
+| `Int64`, `Int128`, `Int256`, `UInt64`, `UInt128`, `UInt256` | `bigint` | `9007199254740993n` |
+| `Float32`, `Float64` | `number` | `1.5` |
+| `Decimal(p, s)` | `string` | `"12.50"` |
+| `String`, `FixedString(n)`, `UUID`, `IPv4`, `IPv6` | `string` | `"Ada"` |
+| `Enum8`, `Enum16` | its labels | `"pro"` |
+| `Date`, `Date32` | `string` | `"2026-10-20"` |
+| `DateTime`, `DateTime64(p)` | `string` | `"2026-10-20T08:00:00.123Z"` |
+| `JSON` | `Json` | `{ a: [1, "x"] }` |
+| `Array(T)` | `T[]` | `["a", "b"]` |
+| `Tuple(a T, …)` | `{ a: T; … }` | `{ lat: 45.46, lon: 9.19 }` |
+| `Map(K, V)` | `Record<string, V>` | `{ plan: "pro" }` |
+| `Nullable(T)` | `T \| null` | `null` |
+| `LowCardinality(T)`, `SimpleAggregateFunction(f, T)` | as `T` | |
+| A `Tuple` of unnamed elements, `Variant`, `Dynamic`, `Interval`, `Time`, a geo type, `AggregateFunction` | `unknown` | the value as ClickHouse's JSON writes it |
+
+<Rules>
+
+**Integers**
+
+An `Int64`, a `UInt64` or a wider integer is a `bigint`, so no value is ever rounded: `count()` returns a `UInt64`. A parameter of one takes a `number`, a `bigint` or a string of digits.
+
+<Inferred>
+
+```sql file="ch_types_integers.sql" dialect="clickhouse"
+select id, team_id, count() over () as n
+from users
+```
+
+</Inferred>
+
+**Decimals**
+
+A `Decimal` is its exact text, with every digit of its scale, and a parameter of one takes that text or a `number`.
+
+**Strings**
+
+A `String` holds bytes, which `.run()` reads as UTF-8 text. A `FixedString(n)` keeps the zero bytes that pad it, as `"ab\0"` for a `FixedString(3)`.
+
+**Dates and times**
+
+A `DateTime` or a `DateTime64` is an instant, whatever time zone its column shows it in: its ISO 8601 text in UTC, as `Temporal.Instant.from` reads it, with as many fraction digits as its precision. A `Date` is `YYYY-MM-DD`.
+
+<Inferred>
+
+```sql file="ch_types_dates.sql" dialect="clickhouse"
+select at, day, toStartOfHour(at) as hour
+from events
+```
+
+</Inferred>
+
+**Nested types**
+
+An `Array`, a `Tuple` and a `Map` hold their values as a row does, an `Int64` inside one a `bigint` too. A `Tuple` with named elements is an object of them, and a `Map` an object of its keys, each key a string as JSON holds one. A `Tuple` whose elements have no names is `unknown`, and arrives as an array of its values: name its elements, as in `cast((1, 'a'), 'Tuple(id UInt8, name String)')`.
+
+<Inferred>
+
+```sql file="ch_types_nested.sql" dialect="clickhouse"
+select tags, props, place, place.lat as lat
+from events
+```
+
+</Inferred>
+
+**JSON**
+
+A `JSON` column is the parsed value, typed `Json`, the type Reylo exports for any JSON value. Each number inside it is a `number`, as `JSON.parse` reads one, so an integer past 2<sup>53</sup> is the nearest double. A `JSON` parameter takes any value `JSON.stringify` writes.
+
+</Rules>
+
+### Column names
+
+Every column needs a name that is an identifier, so give each expression one with `as`. ClickHouse names a column with no alias after the text of its expression, `plus(id, 1)`, which changes with a parameter's value.
+
+## Nullability
+
+A column is typed `| null` exactly where its ClickHouse type is `Nullable`. ClickHouse works out that type for every expression, so Reylo reads it from the server's description of the query and adds no rule of its own:
+
+<Rules>
+
+**Columns and expressions**
+
+A column declared `Nullable(T)` may be null, and an expression is as ClickHouse types it: `coalesce` with a value that is never null is not null.
+
+<Inferred>
+
+```sql file="ch_null_columns.sql" dialect="clickhouse"
+select name, email, coalesce(email, 'none') as contact
+from users
+```
+
+</Inferred>
+
+**Outer joins**
+
+ClickHouse fills the columns of a row with no match with their type's default, `''` or `0`, not with `NULL`, so a left join's columns keep their types.
+
+<Inferred>
+
+```sql file="ch_null_join.sql" dialect="clickhouse"
+select u.name as name, t.name as team
+from users u
+left join teams t on t.id = u.team_id
+```
+
+</Inferred>
+
+With `join_use_nulls`, ClickHouse fills them with `NULL`, and their types say so:
+
+<Inferred>
+
+```sql file="ch_null_join_nulls.sql" dialect="clickhouse"
+select u.name as name, t.name as team
+from users u
+left join teams t on t.id = u.team_id
+settings join_use_nulls = 1
+```
+
+</Inferred>
+
+**Aggregates**
+
+An aggregate over no rows returns its type's default, `0` for `sum` and `max`, unless its argument is `Nullable`: then it returns `NULL`.
+
+<Inferred>
+
+```sql file="ch_null_aggregates.sql" dialect="clickhouse"
+select count() as n, max(id) as newest, max(total) as largest
+from events
+```
+
+</Inferred>
+
+**Settings**
+
+A setting changes these types: `join_use_nulls`, `aggregate_functions_null_for_empty` and `data_type_default_nullable` among them. The type check reads the settings of its own connection, so a setting your app's client sets for every query belongs in the type check's URL too, as `clickhouse://localhost:8123/app?join_use_nulls=1`, or in the query's own `settings` clause.
+
+</Rules>
+
+## Cardinality
+
+Reylo infers how many rows a query returns from its shape. ClickHouse enforces no unique key, so a `where` on a table's key says nothing about how many rows match:
+
+| Query | `.run()` returns |
+| --- | --- |
+| An aggregate with no `group by`, and a `select` with no `from` | `Row` |
+| `limit 1` | `Row \| null` |
+| Anything else, `where id = :id::UInt64` too | `Row[]` |
+| `insert`, `alter`, and every statement that returns no rows | `void` |
+
+<Inferred>
+
+```sql file="ch_rows_one.sql" dialect="clickhouse"
+select count() as n
+from events
+where user_id = :user_id::UInt64
+```
+
+</Inferred>
+
+<Inferred>
+
+```sql file="ch_rows_limit.sql" dialect="clickhouse"
+select id, name
+from users
+where id = :id::UInt64
+limit 1
+```
+
+</Inferred>
+
+## Parameters
+
+### Placeholders
+
+Write a parameter as `:name` with a cast right after it, `:id::UInt64`, or as ClickHouse's own substitution, `{id:UInt64}`, and pass `.run()` an object with those names. ClickHouse has no positional placeholder: its `?` is the conditional operator.
+
+<Inferred>
+
+```sql file="ch_param_cast.sql" dialect="clickhouse"
+select id, name
+from users
+where id = :id::UInt64
+  and created_at > {since:DateTime64(3, 'UTC')}
+```
+
+</Inferred>
+
+A list is one parameter, an `Array`:
+
+<Inferred>
+
+```sql file="ch_param_list.sql" dialect="clickhouse"
+select id, kind
+from events
+where has({kinds:Array(String)}, kind)
+```
+
+</Inferred>
+
+### Parameters without a type
+
+ClickHouse binds a parameter by the type it states, and types none from where it stands, so a parameter with no type is an error that shows both ways to state one. The exception is a whole value of an `insert … values`, which takes its column's type:
+
+<Inferred>
+
+```sql file="ch_param_insert.sql" dialect="clickhouse"
+insert into users (id, name, email, team_id, plan, created_at)
+values (:id, :name, :email, :team_id, :plan, :created_at)
+```
+
+</Inferred>
+
+### What a parameter takes
+
+A parameter accepts the same values `.run()` returns for its type, so you can pass a row straight into the next query:
+
+| Parameter type | Takes |
+| --- | --- |
+| An integer up to 32 bits | `number` |
+| An integer of 64 bits or more | `number`, `bigint` or a string of digits |
+| `Decimal` | `string` or `number` |
+| `Date` | `string`, as `"2026-10-20"` |
+| `DateTime`, `DateTime64` | `string` that names its zone as `Z` or an offset, as `date.toISOString()` writes one |
+| `Array(T)` | An array, with `null` elements only for an `Array(Nullable(T))` |
+| `Tuple(a T, …)` | An object of its elements |
+| `Map(K, V)` | An object of its keys |
+| `JSON` | Any value `JSON.stringify` writes |
+
+Before the query runs, `.run()` throws for a value ClickHouse would read as another: a fraction for an integer, an integer past its type's range, which ClickHouse wraps around (300 as a `UInt8` is 44), a date past its type's range, and an instant with no zone, which ClickHouse would read in the column's.
+
+### Parameters that may be null
+
+A parameter accepts `null` where its type is `Nullable`. Such a parameter is optional in `.run()`, and leaving it out passes `null`.
+
+<Inferred>
+
+```sql file="ch_param_nullable.sql" dialect="clickhouse"
+select id, name
+from users
+where email = ifNull({email:Nullable(String)}, email)
+```
+
+</Inferred>
+
+## Database errors
+
+With [`.try()`](/usage#try), an error ClickHouse raised comes back as `{ error }`:
+
+| Field | What it holds |
+| --- | --- |
+| `code` | The error's name, as `"UNKNOWN_TABLE"` |
+| `errno` | The error's number, as `60` |
+| `message` | ClickHouse's message |
+
+## Drivers
+
+Reylo decodes its query results itself, so the format and the output settings on your client don't affect Reylo's queries.
+
+### `@clickhouse/client`
+
+Pass the client. The client of `@clickhouse/client-web` works the same way:
+
+```ts
+import { createClient } from "@clickhouse/client";
+import getUser from "./get_user.sql";
+
+const db = createClient({ url: "http://localhost:8123", database: "app" });
+
+const user = await getUser.run(db, { id: 1 });
+```
+
+A query that returns rows runs through the client's `query()`, as `JSONCompact`, and one that returns none through its `command()`. Reylo sets the settings that make each value exact for its own queries, so the client's user must be allowed to change settings: `readonly` 0 or 2.
+
+## Limits
+
+What Reylo can't type on ClickHouse, and what to do instead:
+
+| Limit | Instead |
+| --- | --- |
+| A parameter with no type, outside an `insert … values` | Cast it, `:id::UInt64`, or write `{id:UInt64}` |
+| A column with no alias | Give it a name with `as` |
+| `show`, `describe`, `explain` and `exists`, whose rows ClickHouse doesn't describe before it runs them | Read the system tables with a `select`, as `select name from system.tables` |
+| A `format` clause and `into outfile`: the driver names the format a result is read in | Leave them out |
+| An `insert` whose rows follow a `format`, or come from a file or a stream | Write the row as `values (:id, :name)`, or insert with the client's own `insert()` |
+| `rows(…)` and `row(…)` parameters | Pass an `Array` of a `Tuple`'s elements, or one parameter per value |
+| A table with rows of one key, which ClickHouse allows: `where id = :id::UInt64` is typed `Row[]` | Add `limit 1` for `Row \| null` |
+| A `Tuple` of unnamed elements, a `Variant`, a `Dynamic`, an `Interval` and a geo type, which are `unknown` | Cast to a type with names, or select the parts you need |
+| An instant within the second before 1970 as a `DateTime64` parameter that stands alone, which ClickHouse reads with the wrong sign | Pass it inside an `Array`, or as a `String` the query parses |
+| A user with `readonly = 1`, who may change no setting | Use `readonly = 2` |
+| ClickHouse's native protocol, on ports 9000 and 9440 | Name the HTTP interface's port, 8123 or 8443 |
+| `.runSync()`, since the client answers through a promise | Use `.run()` |
+| A file of several statements, such as a migration | Put each statement in a file of its own |

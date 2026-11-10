@@ -24,7 +24,7 @@ import { collectFiles, DIALECT_NAME, INFERRED_LAYOUT, SCHEMA_FILE, type Dialect 
 import { formatType, resultType } from '../../src/type-format.ts';
 
 /** The dialects the playground tries a statement on: the main page's, each against its own schema. */
-type Dialect = Exclude<PageDialect, 'duckdb'>;
+type Dialect = Exclude<PageDialect, 'duckdb' | 'clickhouse'>;
 const site = path.resolve(import.meta.dirname, '..');
 const ORDER: Dialect[] = ['postgres', 'mysql', 'sqlite'];
 const SERVERS: Record<Exclude<Dialect, 'sqlite'>, string> = {

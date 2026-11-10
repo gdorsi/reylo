@@ -9,7 +9,8 @@
 // For each page and dialect it builds the page's schema (the `schema.sql` blocks, one per
 // dialect, in the accordion near the top) in a scratch database: Postgres and MySQL
 // `reylo_capture` (REYLO_CAPTURE_POSTGRES and REYLO_CAPTURE_MYSQL name others; the database is
-// dropped and made again, so its name must start with reylo_capture), SQLite and DuckDB a temporary file. It
+// dropped and made again, so its name must start with reylo_capture), SQLite and DuckDB a temporary file,
+// and ClickHouse `reylo_capture` on the server REYLO_CAPTURE_CLICKHOUSE names, where a page has ClickHouse's statements. It
 // compiles the syntax the engine does not build yet (typed JSON parameters, `::` on MySQL and
 // SQLite), has the loader's own Session analyze each statement through the dialect's driver, and
 // renders the module exactly as src/mapper.ts does, with each typed JSON parameter's type computed
@@ -42,6 +43,7 @@ const site = path.resolve(import.meta.dirname, '..');
 const URLS: Record<Exclude<Dialect, 'sqlite' | 'duckdb'>, string> = {
   postgres: process.env.REYLO_CAPTURE_POSTGRES ?? 'postgres://postgres@localhost:54329/reylo_capture',
   mysql: process.env.REYLO_CAPTURE_MYSQL ?? 'mysql://root@127.0.0.1:54336/reylo_capture',
+  clickhouse: process.env.REYLO_CAPTURE_CLICKHOUSE ?? 'clickhouse://127.0.0.1:54338/reylo_capture',
 };
 /** The scratch database an `<Inferred>` card's own schema is built in, on the same server: made again for each card. */
 const cardUrl = (url: string) => {
@@ -50,10 +52,10 @@ const cardUrl = (url: string) => {
   return u.href;
 };
 // The driver each scratch project names, whose defaults the types follow, as for a project with
-// that driver: postgres.js, mysql2, node:sqlite (no package), and @duckdb/node-api, on which DuckDB's
-// statements are typed.
-const DRIVER: Record<Dialect, string | undefined> = { postgres: 'postgres', mysql: 'mysql2', sqlite: undefined, duckdb: '@duckdb/node-api' };
-const ORDER: Dialect[] = ['postgres', 'mysql', 'sqlite', 'duckdb'];
+// that driver: postgres.js, mysql2, node:sqlite (no package), @duckdb/node-api, on which DuckDB's
+// statements are typed, and @clickhouse/client.
+const DRIVER: Record<Dialect, string | undefined> = { postgres: 'postgres', mysql: 'mysql2', sqlite: undefined, duckdb: '@duckdb/node-api', clickhouse: '@clickhouse/client' };
+const ORDER: Dialect[] = ['postgres', 'mysql', 'sqlite', 'duckdb', 'clickhouse'];
 
 // ---- Arguments ----
 
@@ -66,7 +68,7 @@ for (let i = 0; i < args.length; i++) {
   const schema = /^--schema(?:=(.*))?$/.exec(arg);
   if (schema) {
     const value = schema[1] ?? args[++i];
-    const m = /^(postgres|mysql|sqlite|duckdb)=(.+)$/.exec(value ?? '');
+    const m = /^(postgres|mysql|sqlite|duckdb|clickhouse)=(.+)$/.exec(value ?? '');
     if (!m) fail(`--schema takes <dialect>=<file>, as in --schema mysql=schema.sql; got ${value ?? 'nothing'}`);
     schemaFiles[m[1] as Dialect] = readFileSync(path.resolve(m[2]!), 'utf8');
   } else if (arg.startsWith('-')) fail(`unknown option ${arg}`);
@@ -226,6 +228,24 @@ async function buildMysql(schema: string, url = URLS.mysql): Promise<string> {
   return url;
 }
 
+/** ClickHouse over its HTTP interface, which runs one statement a request: the schema's statements end at a semicolon that closes a line. */
+async function buildClickhouse(schema: string, url = URLS.clickhouse): Promise<string> {
+  const { db, admin } = scratch(url);
+  const tls = /^clickhouses:|^clickhouse\+https:/i.test(url);
+  const endpoint = new URL(`${tls ? 'https' : 'http'}://${admin.hostname}:${admin.port || (tls ? 8443 : 8123)}/`);
+  const run = async (statement: string, database?: string) => {
+    const target = new URL(endpoint);
+    if (database) target.searchParams.set('database', database);
+    const response = await fetch(target, { method: 'POST', body: statement, headers: { 'X-ClickHouse-User': decodeURIComponent(admin.username) || 'default', 'X-ClickHouse-Key': decodeURIComponent(admin.password) } });
+    if (!response.ok) throw new Error((await response.text()).trim());
+    await response.arrayBuffer();
+  };
+  await run(`drop database if exists \`${db}\``);
+  await run(`create database \`${db}\``);
+  for (const statement of schema.split(/;[ \t]*(?:\n|$)/)) if (statement.trim()) await run(statement, db);
+  return url;
+}
+
 async function buildDuckdb(dir: string, schema: string): Promise<string> {
   const { DuckDBInstance } = await import('@duckdb/node-api');
   const db = await DuckDBInstance.create(path.join(dir, 'capture.duckdb'));
@@ -341,7 +361,7 @@ try {
       const dir = project(root, dialect);
       let url: string;
       try {
-        url = dialect === 'postgres' ? await buildPostgres(schema) : dialect === 'mysql' ? await buildMysql(schema) : dialect === 'duckdb' ? await buildDuckdb(dir, schema) : buildSqlite(dir, schema);
+        url = dialect === 'postgres' ? await buildPostgres(schema) : dialect === 'mysql' ? await buildMysql(schema) : dialect === 'clickhouse' ? await buildClickhouse(schema) : dialect === 'duckdb' ? await buildDuckdb(dir, schema) : buildSqlite(dir, schema);
       } catch (e) {
         errors.push(`${shown}: the ${DIALECT_NAME[dialect]} ${SCHEMA_FILE} fails: ${(e as Error).message}`);
         continue;
@@ -391,7 +411,7 @@ try {
         const own = project(root, dialect, `${dialect}-card-${i}`);
         let cardDb: string;
         try {
-          cardDb = dialect === 'postgres' ? await buildPostgres(block.schema!, cardUrl(URLS.postgres)) : dialect === 'mysql' ? await buildMysql(block.schema!, cardUrl(URLS.mysql)) : dialect === 'duckdb' ? await buildDuckdb(own, block.schema!) : buildSqlite(own, block.schema!);
+          cardDb = dialect === 'postgres' ? await buildPostgres(block.schema!, cardUrl(URLS.postgres)) : dialect === 'mysql' ? await buildMysql(block.schema!, cardUrl(URLS.mysql)) : dialect === 'clickhouse' ? await buildClickhouse(block.schema!, cardUrl(URLS.clickhouse)) : dialect === 'duckdb' ? await buildDuckdb(own, block.schema!) : buildSqlite(own, block.schema!);
         } catch (e) {
           report(block, `the card's schema fails: ${(e as Error).message}`);
           continue;
@@ -416,7 +436,7 @@ function indent(text: string) {
 /** The module's parameters, row and row count on one line. */
 function summary(module: string): string {
   const m = /^declare const query: Query<(.*)> & \{$/m.exec(module);
-  return m ? m[1]!.replace(/, "(postgres|mysql|sqlite|duckdb)", QueryError$/, '') : module;
+  return m ? m[1]!.replace(/, "(postgres|mysql|sqlite|duckdb|clickhouse)", QueryError$/, '') : module;
 }
 
 for (const w of warnings) console.warn(`warning: ${w}`);

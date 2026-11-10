@@ -52,6 +52,7 @@ export const pageGroups = [
       { title: 'MySQL', href: '/mysql' },
       { title: 'SQLite', href: '/sqlite' },
       { title: 'DuckDB', href: '/duckdb' },
+      { title: 'ClickHouse', href: '/clickhouse' },
     ],
   },
 ];
