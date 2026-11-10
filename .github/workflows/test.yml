@@ -63,7 +63,7 @@ jobs:
           # Every database, or the ones the change reaches.
           everything() {
             echo engine=true
-            echo 'tests=-p reylo-engine-core -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-duckdb -p reylo-engine -p reylo-engine-native -p reylo -p reylo-oracle'
+            echo 'tests=-p reylo-engine-core -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-duckdb -p reylo-engine-clickhouse -p reylo-engine -p reylo-engine-native -p reylo -p reylo-oracle'
             echo 'shards=["postgres","sqlite","duckdb","mysql-1","mysql-2","mysql-slow"]'
             echo playground=true
           }
@@ -85,13 +85,14 @@ jobs:
             everything >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          postgres=false mysql=false sqlite=false duckdb=false binary=false
+          postgres=false mysql=false sqlite=false duckdb=false clickhouse=false binary=false
           while read -r file; do
             case "$file" in
               engine/postgres/*) postgres=true ;;
               engine/mysql/* | oracle/cases/mysql_*) mysql=true ;;
               engine/sqlite/* | oracle/cases/sqlite_*) sqlite=true ;;
               engine/duckdb/* | oracle/cases/duckdb_*) duckdb=true ;;
+              engine/clickhouse/*) clickhouse=true ;;
               engine/cli/*) binary=true ;;
               oracle/cases/*) postgres=true ;;
             esac
@@ -101,6 +102,8 @@ jobs:
           $sqlite && { tests="$tests -p reylo-engine-sqlite"; shards="$shards,\"sqlite\""; }
           $duckdb && { tests="$tests -p reylo-engine-duckdb"; shards="$shards,\"duckdb\""; }
           $mysql && { tests="$tests -p reylo-engine-mysql"; shards="$shards,\"mysql-1\",\"mysql-2\",\"mysql-slow\""; }
+          # ClickHouse's engine has its own tests and no oracle cases.
+          $clickhouse && tests="$tests -p reylo-engine-clickhouse"
           # The binary's own crate, which links every database.
           $binary && tests="$tests -p reylo"
           if [ -z "$tests" ]; then
@@ -155,7 +158,7 @@ jobs:
     needs: binary
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Throwaway servers for the tests that run statements, on ports clear of the defaults: the loader's tests skip each database whose URL is unset, and this job fails on any skip. Postgres 18 is pgvector's image of it, Postgres 18 with the extension installed, which a spec example's statement reads (spec/examples.ts).
+    # Throwaway servers for the tests that run statements, on ports clear of the defaults: the loader's tests skip each database whose URL is unset, and this job fails on any skip. Postgres 18 is pgvector's image of it, Postgres 18 with the extension installed, which a spec example's statement reads (spec/examples.ts). ClickHouse is 26.8, read over its HTTP interface.
     services:
       postgres:
         image: pgvector/pgvector:pg18
@@ -179,9 +182,22 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 60
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8
+        env:
+          # The default user with no password, reachable from the runner.
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        ports:
+          - 58123:8123
+        options: >-
+          --health-cmd "clickhouse-client --query 'select 1'"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
     env:
       REYLO_TEST_PG: postgres://postgres@127.0.0.1:55432/postgres
       REYLO_TEST_MYSQL: mysql://root@127.0.0.1:53306
+      REYLO_TEST_CLICKHOUSE: clickhouse://127.0.0.1:58123
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

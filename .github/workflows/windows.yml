@@ -95,7 +95,7 @@ jobs:
           ls -la lab/jest/node_modules/reylo
       - run: nub run typecheck
       # The loader's tests: those without a database everywhere, and Postgres's and MySQL's on the
-      # runner's servers.
+      # runner's servers. ClickHouse has no server for Windows, so its tests skip here.
       - name: Run the tests
         env:
           REYLO_TEST_PG: postgres://postgres@127.0.0.1:55432/postgres
