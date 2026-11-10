@@ -8,7 +8,8 @@
 //! certificate is named as the root, is accepted as libpq accepts it. A client certificate
 //! (`sslcert` and `sslkey`) is presented where the URL names one.
 
-// The MySQL program reads only `failed`: mysql_async makes its own TLS configuration.
+// The MySQL program reads only `failed`: mysql_async makes its own TLS configuration. The
+// ClickHouse program reads `config` alone, with every certificate checked in full.
 #![cfg_attr(not(feature = "postgres"), allow(dead_code))]
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};

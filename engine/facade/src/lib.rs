@@ -5,7 +5,7 @@
 //! opens a connection. It replays an analysis, naming the statements it needs described and the
 //! catalog queries it needs run, and a host answers them ([`replay`]).
 //!
-//! Each database's engine is behind a feature (`postgres`, `sqlite`, `mysql`, `duckdb`). A client feature
+//! Each database's engine is behind a feature (`postgres`, `sqlite`, `mysql`, `duckdb`, `clickhouse`). A client feature
 //! (`tokio-postgres`, `rusqlite`, `mysql_async`) adds the answers over that client and an
 //! `analyze` that runs a statement's whole replay on it ([`clients`]). A host that answers the
 //! engine its own way implements [`Answerer`] or [`AsyncAnswerer`] and calls [`replay::run`] or
@@ -38,6 +38,11 @@ pub use reylo_engine_mysql as mysql;
 /// statement. Its host is the app's own DuckDB, so it comes with no client here.
 #[cfg(feature = "duckdb")]
 pub use reylo_engine_duckdb as duckdb;
+/// The ClickHouse engine: the types the server's `DESCRIBE` of a statement reports, read with a
+/// parse of the statement. Its host speaks ClickHouse's HTTP interface, so it comes with no client
+/// here: the native program answers it (engine/native).
+#[cfg(feature = "clickhouse")]
+pub use reylo_engine_clickhouse as clickhouse;
 
 #[cfg(any(feature = "tokio-postgres", feature = "rusqlite", feature = "mysql_async"))]
 pub mod clients;

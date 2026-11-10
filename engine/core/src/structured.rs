@@ -200,10 +200,11 @@ pub fn present(sql: &str, dialect: Dialect) -> bool {
     lexed.placeholders.iter().any(|p| cast_at(sql, p.end).is_some() || json_cast_at(sql, p.end).is_some() || nullable_cast_at(sql, p.end).is_some() || (!reads_casts(dialect) && plain_cast_at(sql, p.end).is_some()))
 }
 
-/// Whether the database reads a `::type` cast itself: Postgres and DuckDB do, MySQL and SQLite do
-/// not.
+/// Whether the database reads a `::type` cast itself: Postgres, DuckDB and ClickHouse do, MySQL and
+/// SQLite do not. ClickHouse's engine does not run this pass at all: a ClickHouse parameter states
+/// its own type, `Nullable` included, so the arms below that name it only complete each match.
 fn reads_casts(dialect: Dialect) -> bool {
-    matches!(dialect, Dialect::Postgres | Dialect::Duckdb)
+    matches!(dialect, Dialect::Postgres | Dialect::Duckdb | Dialect::Clickhouse)
 }
 
 /// After a placeholder ending at `end`: `::rows(` or `::row(`, with any spacing, as `(one, the
@@ -1257,7 +1258,7 @@ impl Writer {
 /// (wiki/typed-json-params.md). Postgres's reader takes `bytea` from its own `\x` text as it is.
 fn binary(m: &Member, dialect: Dialect) -> bool {
     match dialect {
-        Dialect::Postgres | Dialect::Duckdb => false,
+        Dialect::Postgres | Dialect::Duckdb | Dialect::Clickhouse => false,
         Dialect::Sqlite => m.schema.is_none() && affinity(&m.ty) == "BLOB",
         Dialect::Mysql => {
             let t = m.ty.to_ascii_lowercase();
@@ -1304,6 +1305,7 @@ pub fn lower(found: &Found, dialect: Dialect, placeholder: &str, server: &Server
             Dialect::Postgres => ("", if cast.jsonb { "::jsonb" } else { "::json" }),
             // DuckDB has one JSON type, `json`.
             Dialect::Duckdb => ("", "::json"),
+            Dialect::Clickhouse => ("", "::JSON"),
             // MariaDB has no `CAST(… AS JSON)`.
             Dialect::Mysql if server.mariadb => ("JSON_COMPACT(", ")"),
             Dialect::Mysql => ("cast(", " as json)"),
@@ -1319,7 +1321,7 @@ pub fn lower(found: &Found, dialect: Dialect, placeholder: &str, server: &Server
     let q = |n: &str| quote(n, dialect);
     match dialect {
         // `find` refuses a DuckDB rows(…) parameter, so only Postgres's comes here.
-        Dialect::Postgres | Dialect::Duckdb => {
+        Dialect::Postgres | Dialect::Duckdb | Dialect::Clickhouse => {
             let coldefs = |w: &mut Writer| {
                 for (k, m) in ms.iter().enumerate() {
                     if k > 0 {
@@ -2072,7 +2074,7 @@ fn table_columns<D: Describe>(f: &Found, sql: &str, dialect: Dialect, server: &S
     let written = &sql[start..end];
     let rows = match dialect {
         // `find` refuses a DuckDB rows(…) parameter.
-        Dialect::Duckdb => return Some(Vec::new()),
+        Dialect::Duckdb | Dialect::Clickhouse => return Some(Vec::new()),
         Dialect::Postgres => host.query(PG_TABLE_QUERY, vec![serde_json::json!(written)], Scope::Statement)?,
         Dialect::Sqlite => {
             let (schema, name) = split_name(written);
@@ -2089,7 +2091,7 @@ fn table_columns<D: Describe>(f: &Found, sql: &str, dialect: Dialect, server: &S
     Some(
         rows.iter()
             .map(|r| match dialect {
-                Dialect::Postgres | Dialect::Duckdb => {
+                Dialect::Postgres | Dialect::Duckdb | Dialect::Clickhouse => {
                     let default = r.get(7).and_then(as_str).map(|e| copy_of(e, &text(r, 8), dialect));
                     TableColumn { name: text(r, 0), base: text(r, 1), written: text(r, 2), not_null: flag(r, 3), has_default: flag(r, 4), generated: flag(r, 5), always: flag(r, 6), default, inherited: flag(r, 9) }
                 }
@@ -2243,7 +2245,7 @@ fn type_differs(m: &Member, field: &Field, c: &TableColumn, domains: &std::colle
             }
             (mysql_type(&m.ty) != mysql_type(&c.written)).then(|| advice.to_string())
         }
-        Dialect::Duckdb => None,
+        Dialect::Duckdb | Dialect::Clickhouse => None,
         // SQLite keeps a value by the column's affinity; a JSON member is text to it.
         Dialect::Sqlite => (m.schema.is_none() && affinity(&m.ty) != affinity(&c.written)).then(|| format!("their affinities differ ({} and {}), and {advice}", affinity(&m.ty), affinity(&c.written))),
     }

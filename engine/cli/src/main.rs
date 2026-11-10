@@ -13,9 +13,9 @@ const USAGE: &str = "Usage: reylo <command>
                             statement, read from the project's database
   play [--port] [--no-open] Serve the playground on 127.0.0.1, against the project's database
                             (from reylo's npm package: npx reylo play)
-  engine <database> [call]  Serve the analysis engine of postgres, mysql, sqlite or duckdb over
-                            standard input and output, one JSON request per line; with call,
-                            answer the one request on standard input
+  engine <database> [call]  Serve the analysis engine of postgres, mysql, sqlite, duckdb or
+                            clickhouse over standard input and output, one JSON request per
+                            line; with call, answer the one request on standard input
   --version                 Print the version";
 
 fn engine_command(args: &[String]) -> i32 {
@@ -25,8 +25,9 @@ fn engine_command(args: &[String]) -> i32 {
         Some("mysql") => reylo_engine_native::serve(reylo_engine_native::mysql::Mysql::default(), call),
         Some("sqlite") => reylo_engine_native::serve(reylo_engine_native::sqlite::Sqlite::default(), call),
         Some("duckdb") => reylo_engine_native::serve(reylo_engine_native::duckdb::Duckdb, call),
+        Some("clickhouse") => reylo_engine_native::serve(reylo_engine_native::clickhouse::Clickhouse::default(), call),
         other => {
-            eprintln!("reylo engine: name a database: postgres, mysql, sqlite or duckdb{}", other.map(|o| format!(" (not {o})")).unwrap_or_default());
+            eprintln!("reylo engine: name a database: postgres, mysql, sqlite, duckdb or clickhouse{}", other.map(|o| format!(" (not {o})")).unwrap_or_default());
             return 2;
         }
     }

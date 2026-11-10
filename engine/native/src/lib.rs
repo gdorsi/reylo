@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use std::future::Future;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[cfg(feature = "clickhouse")]
+pub mod clickhouse;
 #[cfg(feature = "duckdb")]
 pub mod duckdb;
 #[cfg(feature = "mysql")]
@@ -23,7 +25,7 @@ pub mod mysql;
 pub mod postgres;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "clickhouse"))]
 mod tls;
 
 /// Why a connection could not be opened or kept, by kind, as a command line tells its user: the
@@ -42,7 +44,7 @@ pub enum Failure {
 
 impl Failure {
     /// The failure a program's answer reports.
-    #[cfg_attr(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "postgres", feature = "mysql", feature = "sqlite", feature = "clickhouse")), allow(dead_code))]
     fn of(answer: &Value) -> Failure {
         let message = answer["message"].as_str().unwrap_or_default().to_string();
         match answer["status"].as_str() {
@@ -118,7 +120,7 @@ pub async fn answer<P: Program>(program: &mut P, line: &str) -> String {
 }
 
 /// A URL parameter's value, percent-decoded.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "clickhouse"))]
 pub(crate) fn decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

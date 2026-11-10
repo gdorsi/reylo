@@ -6,11 +6,12 @@ publish = false
 description = "Reylo's engine as a native program per database: JSON requests on standard input, one answer per line on standard output. It answers what the WebAssembly engine answers, and opens its own connection to the database to analyze a statement to its end."
 
 [features]
-default = ["postgres", "mysql", "sqlite", "duckdb"]
+default = ["postgres", "mysql", "sqlite", "duckdb", "clickhouse"]
 postgres = ["reylo-engine/tokio-postgres", "dep:tokio-postgres", "dep:tokio-postgres-rustls"]
 mysql = ["reylo-engine/mysql_async", "dep:mysql_async"]
 sqlite = ["reylo-engine/rusqlite", "dep:rusqlite"]
 duckdb = ["reylo-engine/duckdb"]
+clickhouse = ["reylo-engine/clickhouse", "dep:tokio-rustls"]
 
 [[bin]]
 name = "reylo-postgres"
@@ -32,6 +33,11 @@ name = "reylo-duckdb"
 path = "src/bin/reylo-duckdb.rs"
 required-features = ["duckdb"]
 
+[[bin]]
+name = "reylo-clickhouse"
+path = "src/bin/reylo-clickhouse.rs"
+required-features = ["clickhouse"]
+
 [dependencies]
 reylo-engine = { path = "../facade" }
 reylo-engine-core = { path = "../core" }
@@ -42,6 +48,8 @@ tokio-postgres-rustls = { version = "0.13", optional = true }
 # TLS over rustls and ring, as the Postgres program's.
 mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "default-rustls-ring"], optional = true }
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+# The ClickHouse program's HTTPS, over the same rustls as the others' TLS.
+tokio-rustls = { version = "0.26", default-features = false, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 

@@ -121,6 +121,14 @@ const DUCKDB_QUERY: &str = "select c.table_name as fresh_table, c.column_name as
     from duckdb_columns() c where c.database_name = current_database() and c.schema_name = current_schema() and lower(c.table_name) in ({tables}) \
     order by 1, 2";
 
+/// ClickHouse: every column of each table of the session's database that `{tables}` names. A
+/// column is not null unless its type is `Nullable`, which the type says itself, and every column
+/// has a default: an insert that leaves one out writes its type's default value.
+const CLICKHOUSE_QUERY: &str = "select c.table as fresh_table, c.name as fresh_column, c.type as fresh_type, \
+    if(startsWith(c.type, 'Nullable(') or startsWith(c.type, 'LowCardinality(Nullable('), 'false', 'true') as fresh_not_null, 'true' as fresh_default \
+    from system.columns c where c.database = currentDatabase() and c.table in ({tables}) \
+    order by 1, 2";
+
 /// SQLite: every column of each table `{tables}` (a SELECT of their names) names; an INTEGER
 /// PRIMARY KEY, the rowid, has a default.
 macro_rules! sqlite_query {
@@ -142,6 +150,11 @@ const SQLITE_QUERY_DEFAULTS: &str = sqlite_query!(", p.dflt_value as fresh_expr"
 /// its session's mode, so a MySQL name with one is not checked.
 fn literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// A string literal as ClickHouse reads one: a backslash escapes, so one is doubled as a quote is.
+fn clickhouse_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 /// The facts of `analysis`'s statement, which reads and writes `tables`; `Some(None)` where it
@@ -169,6 +182,7 @@ pub fn facts<D: Describe>(analysis: &Analysis, dialect: Dialect, tables: Option<
         Dialect::Postgres => (if with_defaults { PG_QUERY_DEFAULTS } else { PG_QUERY }).replace("{tables}", &literals.iter().map(|l| format!("({l}::pg_catalog.text)")).collect::<Vec<_>>().join(", ")),
         Dialect::Mysql => MYSQL_QUERY.replace("{tables}", &literals.join(", ")),
         Dialect::Duckdb => DUCKDB_QUERY.replace("{tables}", &names.iter().map(|n| literal(&n.to_lowercase())).collect::<Vec<_>>().join(", ")),
+        Dialect::Clickhouse => CLICKHOUSE_QUERY.replace("{tables}", &names.iter().map(|n| clickhouse_literal(n)).collect::<Vec<_>>().join(", ")),
         Dialect::Sqlite => (if with_defaults { SQLITE_QUERY_DEFAULTS } else { SQLITE_QUERY }).replace("{tables}", &literals.iter().enumerate().map(|(k, l)| if k == 0 { format!("select {l} as value") } else { format!("select {l}") }).collect::<Vec<_>>().join(" union all ")),
     };
     // A function the analysis read through is a fact beside the columns its body names.

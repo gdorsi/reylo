@@ -4,7 +4,8 @@
 //! `namedPlaceholders` and SQLite accept; SQLite's own `@name` and `$name` are named placeholders
 //! there too. Beside them a statement may use its database's own positional form instead, never
 //! both: `$1` on Postgres, `?` on MySQL, `?` and `?NNN` on SQLite, and `$1`, `?` and `?NNN` on
-//! DuckDB. A form the database does not
+//! DuckDB. ClickHouse has no positional form: its own is `{name:Type}`, a named parameter that
+//! states its type, which a statement may write beside `:name`. A form the database does not
 //! have is refused where the database would misread it: SQLite takes `$1` for a parameter named
 //! `$1`, a Postgres `$name` outside a dollar quote is a syntax error, and DuckDB takes `$name` for a
 //! parameter Reylo does not bind, so each is an error that
@@ -27,7 +28,10 @@
 //! `sql_mode` ([`MysqlText`]): a backslash in a string escapes the character after it, a
 //! double-quoted word is a string, `#` starts a line comment as `-- ` does (`--` followed by
 //! anything else is two minus signs), a block comment ends at its first `*/`, and backquotes quote
-//! a name. The spans it skipped as text are returned as [`Lexed::opaque`], so a caller that looks
+//! a name. ClickHouse reads a backslash as an escape in a string and in a quoted name alike, `# `
+//! and `#!` as a line comment, `$tag$…$tag$` as a string, and `a ? b : c` as a conditional, whose
+//! `?` is no placeholder and whose `:` starts none; the `:` of a JSON path's `.:Type` starts none
+//! either. The spans it skipped as text are returned as [`Lexed::opaque`], so a caller that looks
 //! for its own construct in the statement does not need a scanner of its own.
 
 use crate::dialect::Dialect;
@@ -273,6 +277,9 @@ pub fn lex_mysql(sql: &str, named: Named, text: MysqlText) -> Result<Lexed, LexE
 fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Result<Lexed, LexError> {
     let sqlite_named = dialect == Dialect::Sqlite && named == Named::Dialect;
     let mysql = dialect == Dialect::Mysql;
+    let clickhouse = dialect == Dialect::Clickhouse;
+    // The ClickHouse conditionals (`a ? b : c`) whose `:` the walk has not reached yet.
+    let mut conditionals = 0usize;
     let b = sql.as_bytes();
     let mut i = 0usize;
     let mut last = Last::Other;
@@ -300,14 +307,15 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
         match c {
             // A MySQL string, unless ANSI_QUOTES makes `"` a name's quote.
             b'\'' | b'"' if c == b'\'' || (mysql && !text.ansi_quotes) => {
-                let Some(end) = quoted_end(b, i, mysql && text.backslash_escapes) else {
+                let Some(end) = quoted_end(b, i, (mysql && text.backslash_escapes) || clickhouse) else {
                     return Err(LexError { message: "unterminated string literal".into(), offset: i });
                 };
                 opaque.push((i, end));
                 i = end;
-                last = Last::Other;
+                // A string is an operand, which only a ClickHouse conditional's `:` asks about.
+                last = if clickhouse { Last::Operand } else { Last::Other };
             }
-            b'E' | b'e' if b.get(i + 1) == Some(&b'\'') && !prev_is_name_char(b, i) && !mysql => {
+            b'E' | b'e' if b.get(i + 1) == Some(&b'\'') && !prev_is_name_char(b, i) && !mysql && !clickhouse => {
                 let start = i;
                 i += 2;
                 loop {
@@ -326,7 +334,7 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 last = Last::Other;
             }
             b'"' | b'`' => {
-                let Some(end) = quoted_end(b, i, false) else {
+                let Some(end) = quoted_end(b, i, clickhouse) else {
                     return Err(LexError { message: "unterminated quoted identifier".into(), offset: i });
                 };
                 opaque.push((i, end));
@@ -342,7 +350,7 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 }
                 opaque.push((start, i));
             }
-            b'#' if mysql => {
+            b'#' if mysql || (clickhouse && matches!(b.get(i + 1), Some(b' ' | b'!'))) => {
                 let start = i;
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
@@ -397,9 +405,23 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                         i += 1;
                         last = Last::Other;
                     }
+                    // The `:` of a ClickHouse conditional follows its second operand, where no
+                    // parameter can stand, and the one of a JSON path's `.:Type` follows a dot.
+                    _ if clickhouse && conditionals > 0 && last == Last::Operand => {
+                        conditionals -= 1;
+                        i += 1;
+                        last = Last::Other;
+                    }
+                    _ if clickhouse && i > 0 && b[i - 1] == b'.' => {
+                        i += 1;
+                        last = Last::Other;
+                    }
                     Some(&n) if is_name_start(n) && !prev_is_name_char(b, i) => {
                         let end = dotted_name_end(b, i + 1);
-                        one_prefix(sql, &mut first_named, i, end)?;
+                        // ClickHouse's `{name:Type}` is told from `:name` by its braces.
+                        if !clickhouse {
+                            one_prefix(sql, &mut first_named, i, end)?;
+                        }
                         push(sql[i + 1..end].to_string(), i, end, &mut params);
                         i = end;
                         last = Last::Operand;
@@ -411,7 +433,7 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 }
             }
             b'$' => {
-                if matches!(dialect, Dialect::Postgres | Dialect::Duckdb) {
+                if matches!(dialect, Dialect::Postgres | Dialect::Duckdb | Dialect::Clickhouse) {
                     if let Some(tag_end) = dollar_tag_end(b, i) {
                         let tag = &b[i..tag_end];
                         match find_bytes(b, tag, tag_end) {
@@ -474,6 +496,24 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                     last = Last::Other;
                 }
             },
+            // ClickHouse's conditional operator, `a ? b : c`.
+            b'?' if clickhouse => {
+                conditionals += 1;
+                i += 1;
+                last = Last::Other;
+            }
+            // ClickHouse's own parameter, `{name:Type}`: named by its name, its type left to the engine.
+            b'{' if clickhouse => match substitution(b, i) {
+                Some((name_start, name_end, end)) => {
+                    push(sql[name_start..name_end].to_string(), i, end, &mut params);
+                    i = end;
+                    last = Last::Operand;
+                }
+                None => {
+                    i += 1;
+                    last = Last::Other;
+                }
+            },
             b'?' if dialect != Dialect::Postgres => {
                 if b.get(i + 1).is_some_and(u8::is_ascii_digit) && dialect == Dialect::Mysql {
                     let end = digits_end(b, i + 1);
@@ -525,6 +565,53 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
         params.sort_by_key(|p| p.parse::<u64>().unwrap_or(u64::MAX));
     }
     Ok(Lexed { params, placeholders, style, opaque })
+}
+
+/// A ClickHouse substitution at the `{` at `i`, `{name:Type}`: the bounds of its name and the
+/// offset one past its `}`. The type is read to the brace that closes it, past its own
+/// parentheses and strings (`{at:DateTime64(3, 'UTC')}`); `None` where the text is no substitution.
+fn substitution(b: &[u8], i: usize) -> Option<(usize, usize, usize)> {
+    let space = |mut j: usize| {
+        while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        j
+    };
+    let name_start = space(i + 1);
+    if !b.get(name_start).is_some_and(|c| is_name_start(*c)) {
+        return None;
+    }
+    let name_end = name_end(b, name_start);
+    let mut j = space(name_end);
+    if b.get(j) != Some(&b':') || b.get(j + 1) == Some(&b':') {
+        return None;
+    }
+    j += 1;
+    let mut depth = 0usize;
+    loop {
+        match b.get(j)? {
+            b'\'' | b'"' | b'`' => j = quoted_end(b, j, true)?,
+            b'(' => {
+                depth += 1;
+                j += 1;
+            }
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                j += 1;
+            }
+            b'}' if depth == 0 => return Some((name_start, name_end, j + 1)),
+            b'{' | b'}' | b';' => return None,
+            _ => j += 1,
+        }
+    }
+}
+
+/// The type a ClickHouse substitution written at `start..end` states: the text between its `:`
+/// and its `}`, trimmed.
+pub fn substitution_type(sql: &str, start: usize, end: usize) -> Option<&str> {
+    let written = sql.get(start..end)?;
+    let inner = written.strip_prefix('{')?.strip_suffix('}')?;
+    Some(inner.split_once(':')?.1.trim())
 }
 
 /// SQLite reads `:a`, `@a` and `$a` as three parameters, and a name here drops its prefix, so every
@@ -1074,5 +1161,30 @@ mod tests {
         // A misspelt keyword is a syntax error the database reports, not a statement of another kind.
         assert_eq!(check("selec id from users"), Ok(Statement::Query));
         assert_eq!(refused_command("table t already exists"), "table t already exists, so if it is a migration or a schema file, leave it out of the type check with \"exclude\" in tsconfig.json, as in \"exclude\": [\"db/**\"].");
+    }
+
+    #[test]
+    fn clickhouse_reads_its_own_text_and_parameters() {
+        let ch = |sql: &str| names(sql, Dialect::Clickhouse);
+        // Its own substitution beside `:name`, each named by its name, the type left to the engine.
+        assert_eq!(ch("select {id:UInt64}, :name::String, { at : DateTime64(3, 'UTC') } from t where a = :auth.user_id::UInt64"), ["id", "name", "at", "auth.user_id"]);
+        let l = lex("select {id:UInt64}", Dialect::Clickhouse).unwrap();
+        assert_eq!((l.placeholders[0].start, l.placeholders[0].end, l.style), (7, 18, Style::Named));
+        assert_eq!(substitution_type("select {at:DateTime64(3, 'UTC')}", 7, 32), Some("DateTime64(3, 'UTC')"));
+        // Braces that hold no `name:Type` are the server's to refuse.
+        assert!(ch("select {'a': 1}, {}, {a::b}, {a b}").is_empty());
+        // A conditional's `?` is no placeholder and its `:` starts none; a parameter may be an operand.
+        assert!(ch("select a > 1 ? 'x' :y, b ? c : d from t").is_empty());
+        assert_eq!(ch("select a ? :p::UInt8 : :q::UInt8 from t"), ["p", "q"]);
+        // A JSON path's `.:Type` reads a subcolumn.
+        assert!(ch("select doc.a.:Int64, doc.b.:`Array(String)` from t").is_empty());
+        // A backslash escapes in a string and in a quoted name; `# ` and `#!` start a comment.
+        assert_eq!(ch("select 'it\\'s :no', \"a\\\"b :no\", `c\\`d :no` from t where a = :a::UInt8"), ["a"]);
+        assert_eq!(ch("select 1 # :no\n, 2 #! :no\n, :a::UInt8 -- :no"), ["a"]);
+        assert_eq!(ch("select $$ :no $$, $tag$ {no:UInt8} $tag$, /* a /* :no */ :no */ :a::UInt8"), ["a"]);
+        // A parameter appears once, whichever form names it.
+        let sql = "select {a:UInt8}, :a::UInt8";
+        assert_eq!(repeated(sql, &lex(sql, Dialect::Clickhouse).unwrap()).len(), 1);
+        assert_eq!(rewrite(sql, &lex(sql, Dialect::Clickhouse).unwrap(), Target::Dollar).sql, "select $1, $1::UInt8");
     }
 }

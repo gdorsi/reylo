@@ -223,8 +223,9 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
         let b = bytes[i];
         match b {
             b'\'' | b'"' | b'`' => {
-                // MySQL reads a backslash in a string as an escape, and so does Postgres in E'…'.
-                let escapes = (dialect == Dialect::Mysql && b != b'`') || (b == b'\'' && i > 0 && matches!(bytes[i - 1], b'e' | b'E') && (i < 2 || !ident(bytes[i - 2])));
+                // MySQL reads a backslash in a string as an escape, and so does Postgres in E'…';
+                // ClickHouse reads one in a string and in a quoted name alike.
+                let escapes = dialect == Dialect::Clickhouse || (dialect == Dialect::Mysql && b != b'`') || (b == b'\'' && i > 0 && matches!(bytes[i - 1], b'e' | b'E') && (i < 2 || !ident(bytes[i - 2])));
                 let from = i;
                 i += 1;
                 while i < bytes.len() && bytes[i] != b {
@@ -240,7 +241,7 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
                 }
                 continue;
             }
-            b'#' if dialect == Dialect::Mysql => {
+            b'#' if dialect == Dialect::Mysql || (dialect == Dialect::Clickhouse && matches!(bytes.get(i + 1), Some(b' ' | b'!'))) => {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
                 }
@@ -255,7 +256,7 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
                 continue;
             }
             // A dollar-quoted string, `$$…$$` or `$tag$…$tag$`; `$1` is a parameter.
-            b'$' if matches!(dialect, Dialect::Postgres | Dialect::Duckdb) && (i == 0 || !ident(bytes[i - 1])) && bytes.get(i + 1).is_some_and(|c| *c == b'$' || c.is_ascii_alphabetic() || *c == b'_') => {
+            b'$' if matches!(dialect, Dialect::Postgres | Dialect::Duckdb | Dialect::Clickhouse) && (i == 0 || !ident(bytes[i - 1])) && bytes.get(i + 1).is_some_and(|c| *c == b'$' || c.is_ascii_alphabetic() || *c == b'_') => {
                 let tag_end = bytes[i + 1..].iter().position(|c| !(c.is_ascii_alphanumeric() || *c == b'_')).map(|p| i + 1 + p);
                 if let Some(t) = tag_end.filter(|t| bytes[*t] == b'$') {
                     let tag = &bytes[i..=t];

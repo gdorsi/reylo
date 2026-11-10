@@ -35,6 +35,7 @@ struct Input {
 enum Session {
     Postgres(reylo_engine_native::postgres::Session),
     Mysql(reylo_engine_native::mysql::Session),
+    Clickhouse(reylo_engine_native::clickhouse::Session),
     Sqlite(reylo_engine_native::sqlite::Session),
 }
 
@@ -44,6 +45,7 @@ impl Session {
         Ok(match dialect {
             "postgres" => Session::Postgres(reylo_engine_native::postgres::Session::open(url).await?),
             "mysql" => Session::Mysql(reylo_engine_native::mysql::Session::open(url).await?),
+            "clickhouse" => Session::Clickhouse(reylo_engine_native::clickhouse::Session::open(url).await?),
             _ => Session::Sqlite(reylo_engine_native::sqlite::Session::open(&project::sqlite_path(url, base).map_err(Failure::Error)?)?),
         })
     }
@@ -52,6 +54,7 @@ impl Session {
         match self {
             Session::Postgres(s) => &s.version,
             Session::Mysql(s) => &s.version,
+            Session::Clickhouse(s) => &s.version,
             Session::Sqlite(s) => &s.version,
         }
     }
@@ -60,6 +63,7 @@ impl Session {
         match self {
             Session::Postgres(s) => s.analyze(sql).await,
             Session::Mysql(s) => s.analyze(sql).await,
+            Session::Clickhouse(s) => s.analyze(sql).await,
             Session::Sqlite(s) => s.analyze(sql),
         }
     }
@@ -116,7 +120,7 @@ pub fn run(args: &[String]) -> i32 {
         Err(message) => return fail(&message),
     };
     let Some(dialect) = project::dialect_of(&url) else {
-        return fail(&format!("Cannot tell the database from the URL ({}): reylo reads postgres://, postgresql://, mysql://, file:, sqlite: and duckdb: URLs.", if given { "--url" } else { "the project's" }));
+        return fail(&format!("Cannot tell the database from the URL ({}): reylo reads postgres://, postgresql://, mysql://, clickhouse://, clickhouses://, file:, sqlite: and duckdb: URLs.", if given { "--url" } else { "the project's" }));
     };
     if dialect == "duckdb" {
         return fail("A DuckDB database runs inside the app, and the type check reads it through the project's @duckdb/node-api: reylo analyze cannot open one yet.");
@@ -147,6 +151,7 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
     let engine_dialect = match dialect {
         "postgres" => Dialect::Postgres,
         "mysql" => Dialect::Mysql,
+        "clickhouse" => Dialect::Clickhouse,
         _ => Dialect::Sqlite,
     };
     let mut flagged = false;

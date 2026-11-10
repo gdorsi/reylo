@@ -1611,6 +1611,7 @@ name = "reylo-engine"
 version = "0.0.0"
 dependencies = [
  "mysql_async",
+ "reylo-engine-clickhouse",
  "reylo-engine-core",
  "reylo-engine-duckdb",
  "reylo-engine-mysql",
@@ -1624,6 +1625,17 @@ dependencies = [
 [[package]]
 name = "reylo-engine-build"
 version = "0.0.0"
+
+[[package]]
+name = "reylo-engine-clickhouse"
+version = "0.0.0"
+dependencies = [
+ "reylo-engine-build",
+ "reylo-engine-core",
+ "serde",
+ "serde_json",
+ "sqlparser 0.63.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "reylo-engine-core"
@@ -1673,6 +1685,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "tokio-rustls",
  "webpki-roots",
 ]
 

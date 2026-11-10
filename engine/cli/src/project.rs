@@ -71,6 +71,7 @@ pub fn dialect_of(url: &str) -> Option<&'static str> {
         "mysql" | "mariadb" => Some("mysql"),
         "file" | "sqlite" => Some("sqlite"),
         "duckdb" => Some("duckdb"),
+        "clickhouse" | "clickhouses" | "clickhouse+http" | "clickhouse+https" => Some("clickhouse"),
         _ => None,
     }
 }
@@ -527,6 +528,9 @@ mod tests {
         assert_eq!(dialect_of("mariadb://root@h"), Some("mysql"));
         assert_eq!(dialect_of("file:./app.db"), Some("sqlite"));
         assert_eq!(dialect_of("duckdb::memory:"), Some("duckdb"));
+        assert_eq!(dialect_of("clickhouse://localhost:8123/app"), Some("clickhouse"));
+        assert_eq!(dialect_of("ClickHouses://abc.clickhouse.cloud"), Some("clickhouse"));
+        assert_eq!(dialect_of("clickhouse+https://h/app"), Some("clickhouse"));
         assert_eq!(dialect_of("http://h"), None);
         assert_eq!(dialect_of(":memory:"), None);
         assert_eq!(sqlite_path(":memory:", Path::new("/app")).unwrap(), ":memory:");
