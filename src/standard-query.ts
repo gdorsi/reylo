@@ -149,6 +149,23 @@ function duckdbDecoder(name: string, kind: string): (v: unknown) => unknown {
   return (v) => decodeDuckdbValue(v, kind, name, (k, x) => coerce(k, x, name));
 }
 
+/**
+ * A ClickHouse column's value as a JSON format writes it under `.run()`'s settings
+ * (src/decode-clickhouse.ts), given its kind: an integer of 64 bits or more from its digits or
+ * from a number that holds it, a NaN or an infinity from its name, an array's elements each as
+ * its kind. A Tuple's and a Map's
+ * values have no kind in the module, and stay as JSON holds them.
+ */
+function clickhouseDecoder(name: string, kind: string): (v: unknown) => unknown {
+  if (kind.endsWith("[]")) {
+    const element = clickhouseDecoder(name, kind.slice(0, -2));
+    return (v) => (Array.isArray(v) ? v.map((e) => (e === null ? null : element(e))) : v);
+  }
+  if (kind === "float") return (v) => (v === "nan" || v === "-nan" ? NaN : v === "inf" || v === "+inf" ? Infinity : v === "-inf" ? -Infinity : coerce(kind, v, name));
+  if (kind === "json" || kind === "unknown") return (v) => v;
+  return (v) => coerce(kind, v, name);
+}
+
 /** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (src/execute.ts). */
 function postgresDecoder(name: string, kind: string, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
@@ -175,7 +192,7 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // included. Its default suits a driver whose integer mode is unknown: a BigInt is read exact, and
   // a number past 2^53 in an INTEGER column is refused as a rounded one.
   const decoders = module.columns?.map(([name, kind, delim], i): ((v: never) => unknown) => {
-    const decode = (dialect === "postgres" ? postgresDecoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays) : dialect === "sqlite" ? sqliteDecoder(name, kind) : dialect === "duckdb" ? duckdbDecoder(name, kind) : decoder(name, kind, delim)) as (v: never) => unknown;
+    const decode = (dialect === "postgres" ? postgresDecoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays) : dialect === "sqlite" ? sqliteDecoder(name, kind) : dialect === "duckdb" ? duckdbDecoder(name, kind) : dialect === "clickhouse" ? clickhouseDecoder(name, kind) : decoder(name, kind, delim)) as (v: never) => unknown;
     // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
     const plan = module.codecs?.[name];
     return plan === undefined ? decode : (v) => decodePlan(plan, decode(v), name);

@@ -650,4 +650,13 @@ const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {
     union all select concat_ws(' ', 't', database_name, schema_name, type_name, logical_type, md5(coalesce(cast(labels as varchar), ''))) from duckdb_types() where not internal
     union all select concat_ws(' ', 'f', database_name, schema_name, function_name, function_type, md5(coalesce(macro_definition, '')), md5(coalesce(cast(parameters as varchar), '')), md5(coalesce(cast(parameter_types as varchar), ''))) from duckdb_functions() where not internal
   ) t`,
+  // The columns of every database but ClickHouse's own, each table and view with its definition,
+  // the functions the server was given, the settings a statement's types follow, and the version.
+  clickhouse: `select hex(MD5(arrayStringConcat(arraySort(groupArray(x)), '\\n'))) from (
+    select concat('v ', version()) as x
+    union all select concatWithSeparator(' ', 'c', database, table, toString(position), name, type, default_kind, hex(MD5(default_expression)), hex(MD5(comment))) from system.columns where database not in ('system', 'INFORMATION_SCHEMA', 'information_schema')
+    union all select concatWithSeparator(' ', 'b', database, name, engine, hex(MD5(create_table_query))) from system.tables where database not in ('system', 'INFORMATION_SCHEMA', 'information_schema') and not is_temporary
+    union all select concatWithSeparator(' ', 'f', name, hex(MD5(create_query))) from system.functions where origin != 'System'
+    union all select concatWithSeparator(' ', 's', name, value) from system.settings where name in ('join_use_nulls', 'aggregate_functions_null_for_empty', 'data_type_default_nullable', 'cast_keep_nullable', 'allow_experimental_analyzer', 'enable_analyzer')
+  ) t`,
 };

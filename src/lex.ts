@@ -1,20 +1,23 @@
 // Placeholder lexing for the runtime loader: finds `:name` (and SQLite's `@name` and `$name`), and
 // the dialect's own positional form (`$1` on Postgres, `?` on MySQL, `?` and `?NNN` on SQLite, and
-// all three on DuckDB),
+// all three on DuckDB, and ClickHouse's own substitution `{name:Type}` there),
 // outside strings and comments, and
 // returns the binding order. A name may be dotted
 // (`:auth.user_id`); each segment starts like a name, so `arr[1:2]` is a slice, and on Postgres a
 // colon that opens a subscript is a slice with no lower bound (`tags[:n]`). MySQL text is read
 // as a session in the default `sql_mode` reads it: a backslash in a string escapes the character
 // after it, `"` quotes a string, `#` starts a line comment, and `--` does only before a space or
-// a control character. This is the provisional JavaScript version of the engine's lexer; the Rust
+// a control character. ClickHouse text is read as ClickHouse reads it: a backslash escapes in a
+// string and in a quoted name, `# ` and `#!` start a line comment, a block comment nests, a
+// conditional's `?` is no placeholder and the `:` of its else starts none, and a JSON path's
+// `.:Type` reads a subcolumn. This is the provisional JavaScript version of the engine's lexer; the Rust
 // engine owns the authoritative one (dollar quoting, E'' strings, nested comments, array slices,
 // MySQL's other modes).
 export type Placeholder = { name: string; start: number; end: number };
 
 // A name drops its prefix (`:id` is `id`); a positional placeholder is named by its number
 // (`$2` and `?2` are `2`), and a bare `?` takes the number after the largest so far.
-export function lexPlaceholders(sql: string, dialect: "postgres" | "mysql" | "sqlite" | "duckdb"): { params: string[]; placeholders: Placeholder[] } {
+export function lexPlaceholders(sql: string, dialect: "postgres" | "mysql" | "sqlite" | "duckdb" | "clickhouse"): { params: string[]; placeholders: Placeholder[] } {
   const placeholders: Placeholder[] = [];
   const params: string[] = [];
   let largest = 0;
@@ -29,22 +32,37 @@ export function lexPlaceholders(sql: string, dialect: "postgres" | "mysql" | "sq
     return n;
   };
   const mysql = dialect === "mysql";
+  const clickhouse = dialect === "clickhouse";
+  // The conditionals whose `?` was read and whose `:` was not.
+  let conditionals = 0;
   // What was read last, past whitespace and comments: an operand (a name other than `array`, a
   // number, a quoted name, a placeholder, `)` or `]`), the `[` of a subscript after one, or other.
   let last: "other" | "operand" | "subscript" = "other";
   while (i < sql.length) {
     const ch = sql[i]!;
     const next = sql[i + 1];
-    if (ch === "'" || (ch === '"' && mysql)) { i = skipQuoted(sql, i, ch, mysql); last = "other"; continue; }
-    if (ch === '"' || ch === "`") { i = skipQuoted(sql, i, ch, false); last = "operand"; continue; }
+    if (ch === "'" || (ch === '"' && mysql)) { i = skipQuoted(sql, i, ch, mysql || clickhouse); last = clickhouse ? "operand" : "other"; continue; }
+    if (ch === '"' || ch === "`") { i = skipQuoted(sql, i, ch, clickhouse); last = "operand"; continue; }
     // MySQL's `--` is two minus signs before anything but a space or a control character.
-    const comment = ch === "#" ? mysql : ch === "-" && next === "-" && !(mysql && i + 2 < sql.length && sql.charCodeAt(i + 2) > 32 && sql.charCodeAt(i + 2) !== 127);
+    const comment = ch === "#" ? mysql || (clickhouse && (next === " " || next === "!")) : ch === "-" && next === "-" && !(mysql && i + 2 < sql.length && sql.charCodeAt(i + 2) > 32 && sql.charCodeAt(i + 2) !== 127);
     if (comment) { i = sql.indexOf("\n", i); if (i === -1) break; continue; }
+    if (ch === "/" && next === "*" && clickhouse) { i = skipNested(sql, i); continue; }
     if (ch === "/" && next === "*") { const end = sql.indexOf("*/", i + 2); i = end === -1 ? sql.length : end + 2; continue; }
     if (ch === ":" && next === ":") {
       // A `::` cast: the type name after it is not a parameter.
       const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(sql.slice(i + 2));
       i += 2 + (m ? m[0].length : 0); last = "operand"; continue;
+    }
+    if (clickhouse) {
+      // A substitution, `{name:Type}`: its type is read to the brace that closes it.
+      const end = ch === "{" ? substitutionEnd(sql, i) : undefined;
+      if (end !== undefined) {
+        push(/^\{\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(sql.slice(i, end))![1]!, i, end); i = end; last = "operand"; continue;
+      }
+      if (ch === "?") { conditionals += 1; i += 1; last = "other"; continue; }
+      // The `:` of a conditional's else, after its operand, and the `:` of a JSON path's `.:Type`.
+      if (ch === ":" && conditionals > 0 && last === "operand") { conditionals -= 1; i += 1; last = "other"; continue; }
+      if (ch === ":" && i > 0 && sql[i - 1] === ".") { i += 1; last = "other"; continue; }
     }
     // A colon that opens a Postgres subscript is a slice with no lower bound, since no expression
     // starts with a colon there; an array constructor's `[` follows `array` or another `[`.
@@ -64,7 +82,7 @@ export function lexPlaceholders(sql: string, dialect: "postgres" | "mysql" | "sq
       const m = /^[0-9]+/.exec(sql.slice(i + 1))!;
       push(position(m[0]), i, i + 1 + m[0].length); i += 1 + m[0].length; last = "operand"; continue;
     }
-    if (ch === "?" && dialect !== "postgres") { largest += 1; push(String(largest), i, i + 1); i += 1; last = "operand"; continue; }
+    if (ch === "?" && dialect !== "postgres" && !clickhouse) { largest += 1; push(String(largest), i, i + 1); i += 1; last = "operand"; continue; }
     if (/\s/.test(ch)) { i += 1; continue; }
     if (/[A-Za-z0-9_]/.test(ch)) {
       // A name or a number, whole: `array` opens a constructor, anything else is an operand.
@@ -82,6 +100,53 @@ export function lexPlaceholders(sql: string, dialect: "postgres" | "mysql" | "sq
 /** Whether a parameter name is a position: a number, where a name starts with a letter or `_`. */
 export function isPositional(name: string): boolean {
   return /^\d+$/.test(name);
+}
+
+/**
+ * The type a ClickHouse parameter states where it is written: a substitution's own, or the cast
+ * right after a `:name`, to the parenthesis that closes its own (`:at::DateTime64(3, 'UTC')`).
+ * Undefined where it states none.
+ */
+export function clickhouseType(sql: string, p: Placeholder): string | undefined {
+  if (sql[p.start] === "{") return sql.slice(sql.indexOf(":", p.start) + 1, p.end - 1).trim();
+  const m = /^\s*::\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(sql.slice(p.end));
+  if (m === null) return undefined;
+  let i = p.end + m[0].length;
+  if (sql[i] !== "(") return m[1]!;
+  let depth = 0;
+  for (; i < sql.length; i++) {
+    const c = sql[i]!;
+    if (c === "'" || c === '"' || c === "`") i = skipQuoted(sql, i, c, true) - 1;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return sql.slice(p.end + m[0].length - m[1]!.length, i + 1);
+  }
+  return undefined;
+}
+
+/** One past the `}` of the ClickHouse substitution at the `{` at `i`, past its type's own parentheses and strings; undefined where the text is none. */
+function substitutionEnd(sql: string, i: number): number | undefined {
+  const m = /^\{\s*[A-Za-z_][A-Za-z0-9_]*\s*:(?!:)/.exec(sql.slice(i, i + 256));
+  if (m === null) return undefined;
+  let depth = 0;
+  for (let j = i + m[0].length; j < sql.length; j++) {
+    const c = sql[j]!;
+    if (c === "'" || c === '"' || c === "`") j = skipQuoted(sql, j, c, true) - 1;
+    else if (c === "(") depth++;
+    else if (c === ")") { if (depth-- === 0) return undefined; }
+    else if (c === "}" && depth === 0) return j + 1;
+    else if (c === "{" || c === "}" || c === ";") return undefined;
+  }
+  return undefined;
+}
+
+/** One past the block comment that opens at `start`, which nests; the end of the text where it is not closed. */
+function skipNested(sql: string, start: number): number {
+  let depth = 0;
+  for (let i = start; i < sql.length; i++) {
+    if (sql[i] === "/" && sql[i + 1] === "*") { depth++; i++; }
+    else if (sql[i] === "*" && sql[i + 1] === "/") { i++; if (--depth === 0) return i + 1; }
+  }
+  return sql.length;
 }
 
 // A doubled quote is one character, and so, where `escapes`, is a backslash and what follows it.

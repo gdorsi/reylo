@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lexPlaceholders } from "../src/lex.ts";
+import { clickhouseType, lexPlaceholders } from "../src/lex.ts";
 import { defineQuery } from "../src/index.ts";
 import { engine as load, type Dialect } from "../src/engine.ts";
 
@@ -62,6 +62,9 @@ test("the runtime's lexer agrees with the engine's", async () => {
     ["select tags[:n], tags[ :m], (f(x))[:pg_t.tgnargs], \"q\"[:k], array[:a, :b], tags[(:c)], tags[1::int:d] from t where y = :y", "postgres"],
     ["select 'C:\\', ?3, `:w`, ? -- :v\n /* :u */", "sqlite"],
     ["select 'C:\\', :x, \"\\\", :y -- :v\n", "sqlite"],
+    ["select {id:UInt64}, :name::String, { at : DateTime64(3, 'UTC') }, {'a': 1}, {}, {a::b} from t where a = :auth.user_id::UInt64", "clickhouse"],
+    ["select a > 1 ? 'x' :y, b ? c : d, e ? :p::UInt8 : :q::UInt8, doc.a.:Int64 from t", "clickhouse"],
+    ["select 'it\\'s :no', \"a\\\"b :no\", `c\\`d :no`, 1 # :no\n, 2 #! :no\n, /* a /* :no */ :no */ :a::UInt8 -- :no", "clickhouse"],
   ];
   for (const [sql, dialect] of statements) {
     const ours = lexPlaceholders(sql, dialect);
@@ -71,6 +74,39 @@ test("the runtime's lexer agrees with the engine's", async () => {
       assert.deepEqual(ours.placeholders, theirs.placeholders, `${dialect}: ${sql}`);
     }
   }
+});
+
+test("ClickHouse text: its own substitution, a conditional, and the type a parameter states", () => {
+  const lexed = (sql: string) => lexPlaceholders(sql, "clickhouse");
+  assert.deepEqual(lexed("select {id:UInt64}, :name::String, { at : DateTime64(3, 'UTC') }").params, ["id", "name", "at"]);
+  // Braces that hold no `name:Type` are the server's to refuse.
+  assert.deepEqual(lexed("select {'a': 1}, {}, {a::b}, {a b}").params, []);
+  // A conditional's `?` is no placeholder and its `:` starts none.
+  assert.deepEqual(lexed("select a > 1 ? 'x' :y, b ? c : d from t").params, []);
+  assert.deepEqual(lexed("select a ? :p::UInt8 : :q::UInt8 from t").params, ["p", "q"]);
+  const sql = "select {tags:Array(LowCardinality(String))}, :at :: DateTime64(3, 'UTC'), :n::UInt8, :bare, (:x + 1)::UInt8";
+  assert.deepEqual(lexed(sql).placeholders.map((p) => clickhouseType(sql, p)), ["Array(LowCardinality(String))", "DateTime64(3, 'UTC')", "UInt8", undefined, undefined]);
+});
+
+test("a ClickHouse query defined by hand binds each parameter by its number and the type it states", async () => {
+  const calls: unknown[] = [];
+  const client = {
+    async query(params: { query: string; clickhouse_settings?: Record<string, unknown> }) {
+      calls.push(params);
+      const body = { meta: [{ name: "n", type: "UInt64" }], data: [[7]] };
+      return { json: async () => body, text: async () => JSON.stringify(body) };
+    },
+    async command() {},
+    async insert() {},
+  };
+  const q = defineQuery<{ id: number; name: string }, { n: bigint }, "many", "clickhouse">({ dialect: "clickhouse", sql: "select count() as n from t where id = :id::UInt64 and name = {name:String} and other = :id::UInt64", params: ["id", "name"] });
+  assert.deepEqual(await q.run(client, { id: 7, name: "a\tb" }), [{ n: 7n }]);
+  const sent = calls[0] as { query: string; clickhouse_settings: Record<string, unknown> };
+  assert.equal(sent.query, "select count() as n from t where id = {p1:UInt64}::UInt64 and name = {p2:String} and other = {p1:UInt64}::UInt64");
+  assert.equal(sent.clickhouse_settings.param_p1, "7");
+  assert.equal(sent.clickhouse_settings.param_p2, "a\\tb");
+  const untyped = defineQuery<{ id: number }, {}, "many", "clickhouse">({ dialect: "clickhouse", sql: "select 1 as one where 1 = :id", params: ["id"] });
+  await assert.rejects(async () => untyped.run(client, { id: 1 }), /states no type/);
 });
 
 // Without the engine's rewritten statement (a query defined by hand) the runtime rewrites it itself.

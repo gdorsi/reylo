@@ -1,4 +1,4 @@
-// What the loader's tests share: the test databases `REYLO_TEST_PG` and `REYLO_TEST_MYSQL` name and a database of a test's own on each, the drivers `lab/drivers` installs, and the content mapper run over its JSON-RPC protocol, as the type check runs it.
+// What the loader's tests share: the test databases `REYLO_TEST_PG`, `REYLO_TEST_MYSQL` and `REYLO_TEST_CLICKHOUSE` name and a database of a test's own on each, the drivers `lab/drivers` installs, and the content mapper run over its JSON-RPC protocol, as the type check runs it.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -11,6 +11,9 @@ export const MAPPER = join(ROOT, "src", "mapper.ts");
 export const INDEX = pathToFileURL(join(ROOT, "src", "index.ts")).href;
 export const PG = process.env.REYLO_TEST_PG;
 export const MYSQL = process.env.REYLO_TEST_MYSQL;
+export const CLICKHOUSE = process.env.REYLO_TEST_CLICKHOUSE;
+/** Why a test of the live ClickHouse skips, or `false`. */
+export const clickhouseLive = !CLICKHOUSE ? "REYLO_TEST_CLICKHOUSE names no server" : !existsSync(join(DRIVERS, "@clickhouse", "client")) ? "lab/drivers is not installed" : false;
 /** Why a test of the live Postgres skips, or `false`. */
 export const pgLive = !PG ? "REYLO_TEST_PG names no server" : !existsSync(join(DRIVERS, "postgres")) ? "lab/drivers is not installed" : false;
 /** Why a test of the live MySQL skips, or `false`. */
@@ -78,6 +81,31 @@ export async function mysqlDatabase(prefix: string, setup?: string) {
       await db.end();
       await admin.query(`drop database if exists ${name}`);
       await admin.end();
+    },
+  };
+}
+
+/** A database of a test's own on the test ClickHouse, its URL, and an @clickhouse/client client of it with each statement of `setup` run first. */
+export async function clickhouseDatabase(prefix: string, setup: readonly string[] = []) {
+  const { createClient } = driver("@clickhouse/client");
+  const u = new URL(CLICKHOUSE!);
+  const http = `${/^clickhouses:|^clickhouse\+https:/i.test(CLICKHOUSE!) ? "https" : "http"}://${u.host}`;
+  const credentials = { username: decodeURIComponent(u.username) || "default", password: decodeURIComponent(u.password) };
+  const admin = createClient({ url: http, ...credentials });
+  const name = `${prefix}_${process.pid}`;
+  await admin.command({ query: `drop database if exists ${name}` });
+  await admin.command({ query: `create database ${name}` });
+  const url = new URL(CLICKHOUSE!);
+  url.pathname = `/${name}`;
+  const client = createClient({ url: http, ...credentials, database: name });
+  for (const statement of setup) await client.command({ query: statement });
+  return {
+    url: url.href,
+    client,
+    async drop() {
+      await client.close();
+      await admin.command({ query: `drop database if exists ${name}` });
+      await admin.close();
     },
   };
 }

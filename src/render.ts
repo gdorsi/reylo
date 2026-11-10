@@ -141,6 +141,10 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
       if (dialect === "duckdb") {
         return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${orNull(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
       }
+      // A ClickHouse Tuple of named elements is an object of them, each NULL where its type says so.
+      if (dialect === "clickhouse") {
+        return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
+      }
       // A Postgres row value, and a geometric type, is an object of its fields, each as a column
       // of its type is (src/values.ts).
       if (dialect === "postgres") return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
@@ -155,6 +159,8 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
     case "map":
       // A DuckDB map's entries stand as a row's values do.
       if (dialect === "duckdb") return `{ key: ${renderType(t.key, false, dialect, codecs)}; value: ${orNull(renderType(t.value.type, false, dialect, codecs))} }[]`;
+      // A ClickHouse Map is an object of its keys, as JSON holds one: every key a string. No codec reaches inside it.
+      if (dialect === "clickhouse") return `Record<string, ${t.value.nullable ? orNull(renderType(t.value.type, false, dialect)) : renderType(t.value.type, false, dialect)}>`;
       break;
     case "tagged_union":
       // A tagged union is one alternative, `{ tag, value }`, as DuckDB's client returns it; inside
@@ -375,6 +381,21 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
     if (t.kind === "record" && t.fields.length && t.fields.every((f) => f.name === "")) return `readonly [${t.fields.map((f) => orNull(renderParamType(f.type, dialect, true, undefined, codecs))).join(", ")}]`;
     if (t.kind === "record" && members === undefined) return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${orNull(renderParamType(f.type, dialect, true, undefined, codecs))}`).join("; ")} }` : "Record<never, never>";
     if (t.kind === "map") return `readonly { key: ${renderParamType(t.key, dialect, true, undefined, codecs)}; value: ${orNull(renderParamType(t.value.type, dialect, true, undefined, codecs))} }[]`;
+  }
+  // ClickHouse reads each parameter from its text, which the run time writes by its type
+  // (src/decode-clickhouse.ts): the digits of an integer of any width, a decimal's digits or a
+  // number, an object for a Tuple of named elements and for a Map, and NULL inside an array where
+  // its type says so.
+  if (dialect === "clickhouse") {
+    const part = (p: { type: EngineType; nullable?: boolean }) => (p.nullable ? orNull : (x: string) => x)(renderParamType(p.type, dialect, true, undefined, codecs));
+    if (t.kind === "integer") return kind === "int8" ? "number | bigint | string" : "number";
+    if (t.kind === "decimal") return "string | number";
+    if (t.kind === "record") return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${part(f)}`).join("; ")} }` : "Record<never, never>";
+    if (t.kind === "map") return `Readonly<Record<string, ${t.value.nullable ? orNull(renderParamType(t.value.type, dialect, true)) : renderParamType(t.value.type, dialect, true)}>>`;
+    if (t.kind === "array") {
+      const inner = part(t.element);
+      return /[|&]/.test(inner) ? `readonly (${inner})[]` : `readonly ${inner}[]`;
+    }
   }
   // A JSON parameter takes the JSON a result of its type holds, which `.run()` writes with
   // `JSON.stringify`, so one with no schema takes whatever that writes, a value with a `toJSON()`

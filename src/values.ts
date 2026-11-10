@@ -21,7 +21,8 @@
 // their fields, as the type descriptor gives them; and `range:k` and `multirange:k` a range of `k`
 // as an object of its bounds and a multirange as an array of them. A DuckDB STRUCT, MAP or UNION
 // is decoded by the result's own types
-// (src/decode-duckdb.ts), each of its values in its own kind's form. `k[]` is an array of `k`, a NULL element `null`, and `a|b` either (a MySQL
+// (src/decode-duckdb.ts), each of its values in its own kind's form, and so is every ClickHouse
+// value (src/decode-clickhouse.ts), a Tuple of named elements an object of them and a Map an object of its keys. `k[]` is an array of `k`, a NULL element `null`, and `a|b` either (a MySQL
 // expression whose type the bound value decides). No kind is a JavaScript Date. An array's text
 // separates its elements with a comma, or with its element type's own delimiter (`:` for PostGIS's
 // `geometry`), which a column carries beside its kind.
@@ -30,7 +31,7 @@
 // reached through `globalThis` where one exists.
 import { bareName, type EngineType } from "./engine-type.ts";
 
-export type Dialect = "postgres" | "mysql" | "sqlite" | "duckdb";
+export type Dialect = "postgres" | "mysql" | "sqlite" | "duckdb" | "clickhouse";
 
 /** A scalar value's representation. */
 export type ScalarKind = "bool" | "int" | "float" | "int8" | "decimal" | "text" | "date" | "timestamp" | "timestamptz" | "interval" | "json" | "bytes" | "vector" | "hstore" | Geometric | "enum" | "set" | "geometry" | "unknown";
@@ -291,6 +292,7 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
       // MySQL's TIME is its text.
       return dialect === "mysql" ? "text" : "interval";
     case "map":
+      // A ClickHouse Map is an object of its keys, decoded by the result's own types (src/decode-clickhouse.ts).
       return dialect === "postgres" && name === "hstore" ? "hstore" : "unknown";
     case "union":
       if (dialect === "sqlite") return "label" in t && t.label !== undefined ? sqliteDeclaredKind(t.label) : "unknown";
@@ -301,7 +303,7 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
       // A DuckDB union is decoded by the result's own types (src/decode-duckdb.ts).
       return "unknown";
     case "record": {
-      // A DuckDB struct is decoded by the result's own types (src/decode-duckdb.ts).
+      // A DuckDB struct and a ClickHouse Tuple are decoded by the result's own types (src/decode-duckdb.ts, src/decode-clickhouse.ts).
       if (dialect !== "postgres") return "unknown";
       // A Postgres row value is an object of its fields, each decoded from its text as a column of
       // its type is.

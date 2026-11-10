@@ -11,7 +11,7 @@ import { bareName, nestsAnyDeep, schemaOf, type EngineType, type JsonSchema } fr
 import { columnKind, RANGE_BOUNDS, sqliteAffinity, sqliteWide, type ScalarKind } from "./values.ts";
 import { leafCodec, type Codec, type Codecs } from "./codecs.ts";
 
-type Dialect = "postgres" | "mysql" | "sqlite" | "duckdb";
+type Dialect = "postgres" | "mysql" | "sqlite" | "duckdb" | "clickhouse";
 type Schema = { [key: string]: unknown };
 type Analysis = {
   /** The prose written in comments before the statement, which describes both schemas. */
@@ -106,6 +106,10 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
     if (kind === "int8") return { type: ["integer", "string"], format: "int64" };
     if (kind === "decimal") return { type: "string", format: "decimal" };
     if (kind === "timestamp") return { type: "string", format: "date-time" };
+  } else if (input && dialect === "clickhouse") {
+    // What the run time writes as ClickHouse's text: a 64-bit or wider integer from a number, a BigInt or its digits; a decimal from its digits or a number.
+    if (kind === "int8") return { type: ["integer", "string"], format: "int64" };
+    if (kind === "decimal") return { type: ["string", "number"], format: "decimal" };
   } else if (input) {
     // A MySQL TINYINT(1) or BIT(1) column's parameter takes the truth value its rows return, or the integer it stores.
     if (dialect === "mysql" && kind === "bool" && t.kind !== "boolean") return { anyOf: [{ type: "boolean" }, { type: "integer", format: "int32" }] };
@@ -125,7 +129,7 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
     // RFC 3339's time, which JSON Schema's `time` format names, needs an offset and stops at 23:59:60.
     case "time": return t.zone === undefined ? { type: "string", description: "a time of day without a time zone (10:00:00.5)" } : { type: "string", description: `pg type ${name}` };
     case "duration": return { type: "string", description: "a length of time as MySQL writes it, up to 838:59:59 either way (-12:00:00.5)" };
-    default: return { type: "string", description: `${dialect === "mysql" ? "MySQL" : dialect === "duckdb" ? "DuckDB" : "pg"} type ${name || t.kind}` };
+    default: return { type: "string", description: `${dialect === "mysql" ? "MySQL" : dialect === "duckdb" ? "DuckDB" : dialect === "clickhouse" ? "ClickHouse" : "pg"} type ${name || t.kind}` };
   }
 }
 
@@ -284,7 +288,8 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       // A result's elements may be null unless the statement shows they are not; a parameter's
       // are strict, but a structured parameter's member keeps them (src/render.ts).
       const each = typeSchema(t.element.type, dialect, input, inJson, inRow, undefined, codecs);
-      const items = (input ? inRow : t.element.nullable) ? nullable(each) : each;
+      // A ClickHouse array's type says whether its elements may be NULL, a parameter's too.
+      const items = (input && dialect !== "clickhouse" ? inRow : t.element.nullable) ? nullable(each) : each;
       // An array the project lets nest holds its elements, or arrays of them at any depth.
       return { type: "array", items: !input && nestsAnyDeep(t) ? { anyOf: [items, { type: "array" }] } : items };
     }
@@ -321,6 +326,11 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
     case "map":
       // A DuckDB map as its entries, each a key and its value, in order.
       if (dialect === "duckdb") return { type: "array", items: object([{ name: "key" }, { name: "value" }], (i) => (i === 0 ? typeSchema(t.key, dialect, input, false, false, undefined, codecs) : nullable(typeSchema(t.value.type, dialect, input, false, false, undefined, codecs)))) };
+      // A ClickHouse Map as an object of its keys, which no codec reaches inside (src/render.ts).
+      if (dialect === "clickhouse") {
+        const value = typeSchema(t.value.type, dialect, input);
+        return { type: "object", additionalProperties: t.value.nullable ? nullable(value) : value };
+      }
       break;
     case "tagged_union":
       // A tagged union as its tag and its value; inside a document, whose form of it the engine

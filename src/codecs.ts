@@ -150,8 +150,8 @@ export function planOf(t: EngineType, dialect: Dialect, codecs: Codecs, param = 
       return element === undefined ? undefined : { array: element };
     }
     case "record": {
-      // A DuckDB struct, a Postgres row value and a structured parameter are objects of their fields.
-      if (dialect !== "duckdb" && dialect !== "postgres" && !param) return undefined;
+      // A DuckDB struct, a Postgres row value, a ClickHouse Tuple of named elements and a structured parameter are objects of their fields.
+      if (dialect !== "duckdb" && dialect !== "postgres" && dialect !== "clickhouse" && !param) return undefined;
       const fields = Object.fromEntries(t.fields.flatMap((f) => {
         const plan = planOf(f.type, dialect, codecs, param);
         return plan === undefined ? [] : [[f.name, plan]];

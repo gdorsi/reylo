@@ -109,9 +109,39 @@ impl Reader<'_> {
         (self.i > start).then(|| String::from_utf8_lossy(&self.b[start..self.i]).into_owned())
     }
 
+    /// Past the parentheses that open here, to the one that closes them, and what they hold unread.
+    fn skip_parentheses(&mut self) -> Option<()> {
+        let mut depth = 0usize;
+        loop {
+            match *self.b.get(self.i)? {
+                b'\'' | b'"' | b'`' => {
+                    self.quoted()?;
+                    continue;
+                }
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.i += 1;
+                        return Some(());
+                    }
+                }
+                _ => {}
+            }
+            self.i += 1;
+        }
+    }
+
     fn ty(&mut self) -> Option<Written> {
         let name = self.word()?;
         let mut args = Vec::new();
+        // A JSON type's parentheses hold paths and settings, in a syntax of their own.
+        if matches!(name.as_str(), "JSON" | "Object") {
+            if self.peek() == Some(b'(') {
+                self.skip_parentheses()?;
+            }
+            return Some(Written { name, args });
+        }
         if self.peek() == Some(b'(') {
             self.i += 1;
             if self.peek() == Some(b')') {
@@ -215,19 +245,10 @@ fn inner(args: &[Arg], at: usize) -> Option<&Written> {
 /// The format's type of what `text` writes, and whether the value may be NULL: only where the
 /// type is a `Nullable`, or a `Variant`, a `Dynamic` or a `JSON` path, which hold NULL themselves.
 pub fn of(text: &str) -> Position {
-    // A JSON type's parentheses hold paths and settings, in a syntax of their own.
-    if is_json(text) {
-        return Position::non_null(Type::json().named("JSON"));
-    }
     match parse(text) {
         Some(written) => of_written(&written),
         None => Position::nullable(Type::opaque(head(text))),
     }
-}
-
-fn is_json(text: &str) -> bool {
-    let text = text.trim();
-    text == "JSON" || text.starts_with("JSON(") || text.starts_with("Object(")
 }
 
 /// The name a type's text starts with, for a type the reader does not read whole.
@@ -248,6 +269,8 @@ pub fn of_written(t: &Written) -> Position {
         "LowCardinality" => inner(&t.args, 0).map_or_else(unread, of_written),
         // The function's result, kept as a plain value.
         "SimpleAggregateFunction" => inner(&t.args, 1).map_or_else(unread, of_written),
+        // A JSON value, alone or inside another: an older server's `Object('json')` too.
+        "JSON" | "Object" => Position::non_null(Type::json().named("JSON")),
         "Bool" => named(Type::boolean()),
         "Int8" => named(integer(8, false)),
         "Int16" => named(integer(16, false)),
@@ -349,7 +372,7 @@ pub fn of_written(t: &Written) -> Position {
 /// Whether ClickHouse reads `text` as a type a parameter can state: one the reader reads whole.
 /// `Identifier`, which a `{name:Identifier}` substitutes a name with, is no type of a value.
 pub fn readable(text: &str) -> bool {
-    is_json(text) || parse(text).is_some_and(|t| t.name != "Identifier")
+    parse(text).is_some_and(|t| t.name != "Identifier")
 }
 
 #[cfg(test)]
@@ -379,6 +402,10 @@ mod tests {
         assert_eq!(short("SimpleAggregateFunction(sum, UInt64)"), "UInt64");
         assert_eq!(short("Nested(a UInt8, b String)"), "({ a: UInt8, b: String(utf8) })[]");
         assert_eq!(of("JSON(max_dynamic_paths = 8, a.b UInt32, SKIP a.c)").ty, Type::json().named("JSON"));
+        assert_eq!(of("Object('json')").ty, Type::json().named("JSON"));
+        // A JSON value inside another type is one too, whatever its parentheses hold.
+        assert_eq!(short("Array(JSON(a.b UInt32, SKIP REGEXP 'x)'))"), short("Array(JSON)"));
+        assert_eq!(short("Tuple(d Date, j JSON, n Nullable(JSON(max_dynamic_types = 4)))"), short("Tuple(d Date, j JSON, n Nullable(JSON))"));
         assert_eq!(of("AggregateFunction(quantile(0.5), Float64)").ty, Type::opaque("AggregateFunction"));
         assert_eq!(of("Variant(String, UInt64)"), Position::nullable(Type::opaque("Variant")));
         assert_eq!(of("Dynamic(max_types = 8)"), Position::nullable(Type::opaque("Dynamic")));

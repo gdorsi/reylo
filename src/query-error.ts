@@ -20,6 +20,8 @@
 //   primary one's number before 0.8.
 // - DuckDB: @duckdb/node-api throws a plain Error whose message names the kind of error first
 //   (`Constraint Error: Duplicate key …`), DuckDB's exception type, and nothing else.
+// - ClickHouse: @clickhouse/client and @clickhouse/client-web throw their ClickHouseError, with
+//   the server's error number as text in `code` and its name in `type`.
 import type { Dialect } from "./execute.ts";
 import type { POSTGRES_CODES } from "./error-codes-postgres.ts";
 import type { MYSQL_CODES } from "./error-codes-mysql.ts";
@@ -235,8 +237,21 @@ export interface DuckdbQueryError extends Error {
   readonly cause: unknown;
 }
 
+/** An error ClickHouse raised: its number, its name, and its message. */
+export interface ClickhouseQueryError extends Error {
+  readonly name: "QueryError";
+  /** The name of the error, as `"UNKNOWN_TABLE"`; undefined where the server's text names none. */
+  readonly code: string | undefined;
+  /** The number of the error, as `60`. */
+  readonly errno: number;
+  /** ClickHouse's message, as `Unknown table expression identifier 'events' in scope SELECT * FROM events. ` */
+  readonly message: string;
+  /** The driver's own error. */
+  readonly cause: unknown;
+}
+
 /** The error a database of the dialect raised. */
-export type QueryError<D extends Dialect = Dialect> = D extends "postgres" ? PostgresError : D extends "mysql" ? MysqlError : D extends "duckdb" ? DuckdbQueryError : SqliteError;
+export type QueryError<D extends Dialect = Dialect> = D extends "postgres" ? PostgresError : D extends "mysql" ? MysqlError : D extends "duckdb" ? DuckdbQueryError : D extends "clickhouse" ? ClickhouseQueryError : SqliteError;
 
 class DatabaseError extends Error {
   constructor(message: string, cause: unknown, fields: Record<string, unknown>) {
@@ -259,6 +274,12 @@ export async function readQueryError(dialect: Dialect, error: unknown): Promise<
     const kind = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype && typeof e?.message === "string" ? /^([A-Za-z ]+?) Error: /.exec(e.message)?.[1] : undefined;
     if (kind === undefined) return undefined;
     return new DatabaseError(e!.message as string, error, { code: (DUCKDB_CODES as Record<string, DuckdbCode>)[kind] }) as DuckdbQueryError;
+  }
+  if (dialect === "clickhouse") {
+    // The client's ClickHouseError: the server's number as text, and the name its message ends with.
+    const e = record(error);
+    if (!(error instanceof Error) || e === undefined || typeof e.code !== "string" || !/^\d+$/.test(e.code) || !("type" in e) || typeof e.message !== "string") return undefined;
+    return new DatabaseError(e.message, error, { code: text(e.type), errno: Number(e.code) }) as ClickhouseQueryError;
   }
   if (dialect === "postgres") {
     // Slonik wraps pg's error in its own (InputSyntaxError, UniqueIntegrityConstraintViolationError),

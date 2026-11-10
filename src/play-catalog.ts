@@ -63,6 +63,13 @@ export const CATALOG_QUERIES: Record<Dialect, Queries> = {
   group by function_name order by function_name`,
     types: `select distinct type_name from duckdb_types() where not starts_with(type_name, '_') order by 1`,
   },
+  clickhouse: {
+    // The tables and views of the current database, as an unqualified name finds them.
+    tables: `select table, name, type, startsWith(type, 'Nullable(') or startsWith(type, 'LowCardinality(Nullable(') from system.columns
+  where database = currentDatabase() order by table, position`,
+    functions: `select name, toBool(is_aggregate), [] :: Array(String), false from system.functions where not startsWith(name, '_') order by name`,
+    types: `select name from system.data_type_families where alias_to = '' order by name`,
+  },
 };
 
 /** The type names each database's casts take beyond what its catalog lists: the SQL standard's spellings, or every name where it lists none. */
@@ -71,6 +78,7 @@ const SPELLED: Record<Dialect, string[]> = {
   mysql: ["binary", "char", "date", "datetime", "decimal", "double", "float", "json", "nchar", "real", "signed", "time", "unsigned", "year"],
   sqlite: ["blob", "integer", "numeric", "real", "text"],
   duckdb: ["bigint", "blob", "boolean", "date", "decimal", "double", "float", "hugeint", "integer", "interval", "json", "smallint", "time", "timestamp", "timestamptz", "tinyint", "ubigint", "uhugeint", "uinteger", "usmallint", "utinyint", "uuid", "varchar"],
+  clickhouse: [],
 };
 
 /** A type as the list shows it: Postgres's short names for the long standard ones. */

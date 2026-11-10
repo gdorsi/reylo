@@ -152,7 +152,7 @@ async function databaseBackend(session: Session): Promise<Backend> {
   return {
     dialect,
     ...(project.notice ? { notice: project.notice } : {}),
-    label: `${dialect === "postgres" ? "Postgres" : dialect === "mysql" ? "MySQL" : "SQLite"} at ${session.where()} (${project.urlSource})`,
+    label: `${dialect === "postgres" ? "Postgres" : dialect === "mysql" ? "MySQL" : dialect === "clickhouse" ? "ClickHouse" : "SQLite"} at ${session.where()} (${project.urlSource})`,
     schema: (await schemaDdl(dialect, (sql) => session.query(sql))) ?? schemaText(dialect, cat),
     catalog: cat,
     async analyze(sql, width) {

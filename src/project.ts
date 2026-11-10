@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { type Engine, MissingEngine } from "./engine.ts";
 import type { Codecs } from "./codecs.ts";
 
-export type Dialect = "postgres" | "sqlite" | "mysql" | "duckdb";
+export type Dialect = "postgres" | "sqlite" | "mysql" | "duckdb" | "clickhouse";
 
 /** What the engine reads out of `.reylo.yaml`: the keys the library looks at. */
 export type ProjectFile = {
@@ -117,7 +117,7 @@ function cachedDialects(root: string): Dialect[] {
   for (const name of names.slice(0, CACHED_READ)) {
     try {
       const { dialect } = JSON.parse(readFileSync(join(dir, name), "utf8")) as { dialect?: unknown };
-      if (dialect === "postgres" || dialect === "mysql" || dialect === "sqlite" || dialect === "duckdb") found.add(dialect);
+      if (dialect === "postgres" || dialect === "mysql" || dialect === "sqlite" || dialect === "duckdb" || dialect === "clickhouse") found.add(dialect);
     } catch {}
     if (found.size > 1) break;
   }
@@ -131,6 +131,8 @@ export function dialectOf(url: string): Dialect | undefined {
   if (scheme === "mysql" || scheme === "mariadb") return "mysql";
   if (scheme === "file" || scheme === "sqlite") return "sqlite";
   if (scheme === "duckdb") return "duckdb";
+  // ClickHouse's HTTP interface, which its JavaScript client speaks: `clickhouses:` over TLS.
+  if (scheme === "clickhouse" || scheme === "clickhouses" || scheme === "clickhouse+http" || scheme === "clickhouse+https") return "clickhouse";
   return undefined;
 }
 
@@ -412,7 +414,7 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
     if (hit) urlSource = hit.source;
   }
   let dialect = url ? dialectOf(url) : "postgres";
-  if (url && !dialect) error ??= `Cannot tell the database from the URL (${urlSource}): reylo reads postgres://, postgresql://, mysql://, file:, sqlite: and duckdb: URLs.`;
+  if (url && !dialect) error ??= `Cannot tell the database from the URL (${urlSource}): reylo reads postgres://, postgresql://, mysql://, clickhouse://, clickhouses://, file:, sqlite: and duckdb: URLs.`;
   // Either name, created or removed, changes the project.
   const watched = [...new Set([...(file ? [file] : []), ...both]), ...envFiles];
   // No URL names the database: the entries of `.reylo/`, which a build with no URL reads

@@ -9,9 +9,10 @@ import { bunRows, neonCallable, postgresJs, queryPostgres, slonik } from "./deco
 import { mariadb, mysql2, planetscale } from "./decode-mysql.ts";
 import { libsqlRows, normalize, runDurableObject, runSyncSqlite, runTurso } from "./decode-sqlite.ts";
 import { encodeDuckdb, isDuckdb, runDuckdb, type DuckdbClient } from "./decode-duckdb.ts";
+import { clickhouseParam, isClickhouse, runClickhouse, type ClickhouseClient } from "./decode-clickhouse.ts";
 import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, withinDimensions, zoned, type Columns, type JsonNumbers } from "./values.ts";
 import { bareName, schemaOf, type EngineType } from "./engine-type.ts";
-import { lexPlaceholders } from "./lex.ts";
+import { clickhouseType, lexPlaceholders } from "./lex.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { Checks } from "./checks.ts";
@@ -20,7 +21,7 @@ import type { RowBuilder } from "./row.ts";
 import { compared, due, passed, staleError, warnDrifted, type Fresh } from "./fresh.ts";
 import { decodeCodecs, encodePlan, type Plan } from "./codecs.ts";
 
-export type Dialect = "postgres" | "mysql" | "sqlite" | "duckdb";
+export type Dialect = "postgres" | "mysql" | "sqlite" | "duckdb" | "clickhouse";
 
 /**
  * pg's Pool, Client and PoolClient; PGlite and its transactions; Neon's Pool and Client;
@@ -143,10 +144,11 @@ export type MysqlClient = MysqlExecuteClient | Mysql2CallbackClient | MariadbCli
 export type SqliteClient = SyncSqliteClient | DurableObjectSql | D1Client | LibsqlClient | TursoClient | Sqlite3Client | SqlitePromiseClient | BunSqlClient | DrizzleDatabase<SyncSqliteClient | DurableObjectStorage | D1Client | LibsqlClient | BunSqlClient> | DrizzleSqliteTransaction;
 
 export type { DuckdbClient } from "./decode-duckdb.ts";
+export type { ClickhouseClient } from "./decode-clickhouse.ts";
 
 // Each dialect's clients are one named union, so a hover over `run` reads
 // `run(client: PostgresClient, …)` rather than listing every client's shape.
-export type ClientFor<D extends Dialect> = D extends "postgres" ? PostgresClient : D extends "mysql" ? MysqlClient : D extends "duckdb" ? DuckdbClient : SqliteClient;
+export type ClientFor<D extends Dialect> = D extends "postgres" ? PostgresClient : D extends "mysql" ? MysqlClient : D extends "duckdb" ? DuckdbClient : D extends "clickhouse" ? ClickhouseClient : SqliteClient;
 
 /** The clients `runSync` takes: the synchronous SQLite drivers, and none for Postgres or MySQL. */
 export type SyncClientFor<D extends Dialect> = D extends "sqlite" ? SyncSqliteClient | DurableObjectSql | DrizzleDatabase<SyncSqliteClient | DurableObjectStorage> | DrizzleSyncSqliteTransaction : never;
@@ -349,6 +351,8 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
   if (c == null || (typeof c !== "object" && typeof c !== "function")) throw unsupported(c, query.dialect);
   // A DuckDB connection has prepare() as SQLite's drivers do, and runs no other database's statement.
   if (query.dialect !== "duckdb" && isDuckdb(c)) throw unsupported(c, query.dialect);
+  // A ClickHouse client has query() as pg's do, and runs no other database's statement.
+  if (query.dialect !== "clickhouse" && isClickhouse(c)) throw unsupported(c, query.dialect);
   checkParams(query, params);
   // The catalog facts the statement relied on, read again through the same client.
   if (query.fresh && due(query)) {
@@ -424,6 +428,11 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
     case "duckdb": {
       // @duckdb/node-api's DuckDBConnection: each value given its kind by the result's own types (decode-duckdb.ts).
       if (isDuckdb(c)) return await runDuckdb(c as unknown as DuckdbClient, text, values, names.map((_, i) => type(i)), query.columns);
+      break;
+    }
+    case "clickhouse": {
+      // @clickhouse/client's client: each parameter's text beside the statement, and each value given its kind by the result's own types (decode-clickhouse.ts).
+      if (isClickhouse(c)) return await runClickhouse(c as unknown as ClickhouseClient, text, values as string[], query.columns);
       break;
     }
     case "sqlite": {
@@ -527,7 +536,8 @@ function statement(query: QueryModule, params: ParamsInput) {
     // An array parameter takes no NULL element, as its type says (`:ids::int[]` is `number[]`):
     // a NULL in `= any(:ids)` matches nothing. An array inside a
     // structured parameter's member keeps its NULL elements (src/rows.ts).
-    if (type?.kind === "array" && Array.isArray(bound.values[i])) {
+    // A ClickHouse array's type says whether its elements may be NULL, and its text is checked by it (src/decode-clickhouse.ts).
+    if (type?.kind === "array" && Array.isArray(bound.values[i]) && query.dialect !== "clickhouse") {
       const at = nullElement(bound.values[i] as unknown[]);
       if (at !== undefined) throw new ParameterError(`Parameter "${name}" is an array whose elements may not be null, and the element at ${at} is. Leave it out of the array.`);
     }
@@ -541,7 +551,9 @@ function statement(query: QueryModule, params: ParamsInput) {
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
-  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v) : v));
+  // ClickHouse binds every parameter as the text its type reads, a JSON one's among them.
+  if (query.dialect === "clickhouse") bound.values = bound.values.map((v, i) => clickhouseParam(query.inputs?.[bound.names[i]!]?.type, v, bound.names[i]!, v === JSON_NULL));
+  else if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v) : v));
   // The comment naming the file goes on last, after a structured parameter's lists are written.
   bound.text = sentText(query, bound.text);
   return bound;
@@ -556,7 +568,8 @@ export function sentText(query: QueryModule, text: string): string {
  * The statement and its values in the database's raw form, which a Standard Query's `encode`
  * returns (src/standard-query.ts), bound as `.run()` binds them, its checks included: on Postgres
  * each value's text, which a driver binds with no declared type, so the server reads it as the
- * parameter's type; on MySQL and SQLite each value as a driver binds it.
+ * parameter's type; on MySQL and SQLite each value as a driver binds it; on ClickHouse each
+ * value's text, which the HTTP interface reads as `param_p1`, `param_p2` and on, NULL as `\N`.
  */
 export function rawStatement(query: QueryModule, params: unknown): { text: string; values: unknown[] } {
   checkParams(query, params);
@@ -716,6 +729,8 @@ function checkBinary(type: EngineType | undefined, name: string, v: unknown, dia
 function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name: string): unknown {
   if (type === undefined || v == null) return v;
   if (dialect === "duckdb") return encodeDuckdb(type, v, name);
+  // A ClickHouse value is written as its type's text once every parameter is checked (`statement`).
+  if (dialect === "clickhouse") return v;
   if (dialect === "sqlite") return typeof v === "boolean" ? (v ? 1 : 0) : v;
   if (dialect === "mysql") {
     // A SET goes as its members joined by commas, in the order its column declares them: MySQL
@@ -817,7 +832,8 @@ function dateText(d: Date): string {
  * the authoritative one, and the two agree on every statement the fallback is meant for.
  * Postgres numbers each distinct parameter once; MySQL has only `?`, and better-sqlite3 reads
  * SQLite's `?NNN` as a named parameter, so both get one `?` per placeholder and a repeated name is
- * repeated in the binding order.
+ * repeated in the binding order. ClickHouse binds `{p1:Type}`, each distinct parameter numbered
+ * once with the type it states.
  */
 export function compile(query: QueryModule): { text: string; order: readonly string[] } {
   if (query.text && query.order) return { text: query.text, order: query.order };
@@ -829,11 +845,19 @@ export function compile(query: QueryModule): { text: string; order: readonly str
   const order: string[] = [];
   for (const p of placeholders) {
     const index = indexOf(query, p);
+    if (query.dialect === "clickhouse") {
+      const written = query.sql.slice(p.start, p.end);
+      const type = clickhouseType(query.sql, p);
+      if (type === undefined) throw new Error(`The statement's parameter ${written} states no type, and ClickHouse binds a parameter by one: cast it, as in ${written}::UInt64, or write it as ClickHouse's own {${p.name}:UInt64}.`);
+      text += `${query.sql.slice(last, p.start)}{p${index + 1}:${type}}`;
+      last = p.end;
+      continue;
+    }
     text += query.sql.slice(last, p.start) + (numbered ? `$${index + 1}` : "?");
     order.push(p.name);
     last = p.end;
   }
-  return { text: text + query.sql.slice(last), order: numbered ? query.params : order };
+  return { text: text + query.sql.slice(last), order: numbered || query.dialect === "clickhouse" ? query.params : order };
 }
 
 function indexOf(query: QueryModule, p: { name: string; start: number; end: number }) {
@@ -848,6 +872,7 @@ const accepted: Record<Dialect, string> = {
   mysql: "execute(text, values) as on mysql2 and PlanetScale; query(text, values) as on mariadb's pool or connection, from its promise or callback API; unsafe(text, values) as on Bun.sql; a mysql2 callback pool or connection; or a Drizzle database over one of them",
   sqlite: "prepare(sql) as on better-sqlite3, node:sqlite, bun:sqlite, Turso's @tursodatabase/database and Cloudflare D1; exec(sql, ...values) as on a Durable Object's ctx.storage.sql; execute({ sql, args }) as on @libsql/client; all(sql, params) as on sqlite3 and sqlite; unsafe(text, values) as on Bun.sql; or a Drizzle database over one of them",
   duckdb: "runAndReadAll(sql, values) as on @duckdb/node-api's DuckDBConnection",
+  clickhouse: "query({ query, format }) and command({ query }) as on @clickhouse/client's and @clickhouse/client-web's client",
 };
 
 function unsupported(c: unknown, dialect: Dialect): TypeError {
@@ -871,6 +896,8 @@ function unsupported(c: unknown, dialect: Dialect): TypeError {
   const hint =
     dialect !== "duckdb" && isDuckdb(c as AnyClient)
       ? ` It is a DuckDB connection, and the statement is typed for ${dialect}: set the project's URL to the DuckDB database (duckdb:./app.duckdb).`
+      : dialect !== "clickhouse" && isClickhouse(c as AnyClient)
+      ? ` It is a ClickHouse client, and the statement is typed for ${dialect}: set the project's URL to the ClickHouse database (clickhouse://localhost:8123/default).`
       : typeof o?.db?.prepare === "function"
       ? " A tag store is not a client: pass its database, store.db."
       : typeof o?.selectFrom === "function" && typeof o.executeQuery === "function"
