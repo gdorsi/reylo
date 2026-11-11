@@ -789,7 +789,7 @@ pub fn first_word(sql: &str, lexed: &Lexed) -> String {
 }
 
 /// The first byte at or after `i` that is neither whitespace nor inside a comment.
-fn past_comments(sql: &str, lexed: &Lexed, mut i: usize) -> usize {
+pub fn past_comments(sql: &str, lexed: &Lexed, mut i: usize) -> usize {
     let bytes = sql.as_bytes();
     let is_comment = |start: usize| sql[start..].starts_with("--") || sql[start..].starts_with("/*") || sql[start..].starts_with('#');
     loop {

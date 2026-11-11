@@ -14,6 +14,7 @@
 // protocol, while mysql2's binary protocol drops trailing zeros (`.000`) that `.run()` writes back
 // from the column's metadata.
 import { decodePlan } from "./codecs.ts";
+import { NON_FINITE } from "./decode-clickhouse.ts";
 import { decodeDuckdbValue } from "./decode-duckdb.ts";
 import { sqliteDecoder } from "./decode-sqlite.ts";
 import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
@@ -161,7 +162,7 @@ function clickhouseDecoder(name: string, kind: string): (v: unknown) => unknown 
     const element = clickhouseDecoder(name, kind.slice(0, -2));
     return (v) => (Array.isArray(v) ? v.map((e) => (e === null ? null : element(e))) : v);
   }
-  if (kind === "float") return (v) => (v === "nan" || v === "-nan" ? NaN : v === "inf" || v === "+inf" ? Infinity : v === "-inf" ? -Infinity : coerce(kind, v, name));
+  if (kind === "float") return (v) => NON_FINITE.get(v) ?? coerce(kind, v, name);
   if (kind === "json" || kind === "unknown") return (v) => v;
   return (v) => coerce(kind, v, name);
 }

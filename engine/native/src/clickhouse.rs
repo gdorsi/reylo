@@ -406,6 +406,12 @@ impl Connection {
     }
 }
 
+/// The answer for an error the server raised: a login it refused, or any other.
+fn refusal(e: DbError) -> Value {
+    let status = if e.code.as_deref().is_some_and(|code| REFUSED_LOGIN.contains(&code)) { "refused" } else { "error" };
+    json!({ "status": status, "message": e.message, "code": e.code })
+}
+
 /// A connection to the server a URL names, and the server's `version()`, or the answer the program
 /// gives for why there is none.
 async fn connect(url: &str) -> Result<(Http, String), Value> {
@@ -413,8 +419,7 @@ async fn connect(url: &str) -> Result<(Http, String), Value> {
     let mut http = Http::new(target).map_err(|message| json!({ "status": "error", "message": message }))?;
     match http.rows("select version()").await {
         Err(lost) => Err(lost.answer()),
-        Ok(Err(e)) if e.code.as_deref().is_some_and(|code| REFUSED_LOGIN.contains(&code)) => Err(json!({ "status": "refused", "message": e.message, "code": e.code })),
-        Ok(Err(e)) => Err(json!({ "status": "error", "message": e.message, "code": e.code })),
+        Ok(Err(e)) => Err(refusal(e)),
         Ok(Ok(rows)) => {
             let version = rows.first().and_then(|r| r.first()).and_then(Value::as_str).unwrap_or_default().to_string();
             Ok((http, version))
@@ -438,15 +443,6 @@ impl Session {
 
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         self.connection.analyze(sql).await.map_err(|answer| Failure::of(&answer))
-    }
-
-    /// A query's rows, each an array of its values, for a host that reads the database itself.
-    pub async fn query(&mut self, sql: &str) -> Result<Vec<Vec<Value>>, Failure> {
-        match self.connection.http.rows(sql).await {
-            Err(lost) => Err(Failure::of(&lost.answer())),
-            Ok(Err(e)) => Err(Failure::Error(e.message)),
-            Ok(Ok(rows)) => Ok(rows),
-        }
     }
 }
 
@@ -494,8 +490,7 @@ impl Program for Clickhouse {
                     }
                     match c.http.rows(sql).await {
                         Ok(Ok(rows)) => json!({ "status": "rows", "rows": rows }),
-                        Ok(Err(e)) if e.code.as_deref().is_some_and(|code| REFUSED_LOGIN.contains(&code)) => json!({ "status": "refused", "message": e.message, "code": e.code }),
-                        Ok(Err(e)) => json!({ "status": "error", "message": e.message, "code": e.code }),
+                        Ok(Err(e)) => refusal(e),
                         Err(lost) => lost.answer(),
                     }
                 }

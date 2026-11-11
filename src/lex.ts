@@ -82,7 +82,7 @@ export function lexPlaceholders(sql: string, dialect: "postgres" | "mysql" | "sq
       const m = /^[0-9]+/.exec(sql.slice(i + 1))!;
       push(position(m[0]), i, i + 1 + m[0].length); i += 1 + m[0].length; last = "operand"; continue;
     }
-    if (ch === "?" && dialect !== "postgres" && !clickhouse) { largest += 1; push(String(largest), i, i + 1); i += 1; last = "operand"; continue; }
+    if (ch === "?" && dialect !== "postgres") { largest += 1; push(String(largest), i, i + 1); i += 1; last = "operand"; continue; }
     if (/\s/.test(ch)) { i += 1; continue; }
     if (/[A-Za-z0-9_]/.test(ch)) {
       // A name or a number, whole: `array` opens a constructor, anything else is an operand.

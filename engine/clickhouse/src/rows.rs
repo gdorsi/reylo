@@ -12,6 +12,7 @@
 use crate::catalog::Aggregates;
 use crate::params;
 use reylo_engine_core::analysis::ResultTarget;
+use reylo_engine_core::dialect::Dialect;
 use reylo_engine_core::fresh::Tables;
 use reylo_engine_core::types::Cardinality;
 use sqlparser::ast::{Expr, Fetch, Function, GroupByExpr, LimitClause, ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableObject, Value, Visit, Visitor};
@@ -70,13 +71,13 @@ fn calls(e: &Expr, found: &mut Vec<String>) {
     let _ = e.visit(&mut Calls { depth: 0, found });
 }
 
-/// Whether `text` holds `word` as a word, without case.
+/// Whether `text` holds `word` as a word of its code, without case.
 fn has_word(text: &str, word: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let b = lower.as_bytes();
-    let is_name = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    lower.match_indices(word).any(|(at, _)| (at == 0 || !is_name(b[at - 1])) && !b.get(at + word.len()).is_some_and(|c| is_name(*c)))
+    reylo_engine_core::errors::has_word(text, Dialect::Clickhouse, &[word])
 }
+
+/// Why a SELECT with no LIMIT 1 and no lone aggregate is not known to return one row.
+const NO_BOUND: &str = "nothing bounds its rows to one: a ClickHouse table has no unique key, so only LIMIT 1 or an aggregate with no GROUP BY does";
 
 fn is_one(e: &Expr) -> bool {
     matches!(e, Expr::Value(v) if matches!(&v.value, Value::Number(n, _) if n.to_string() == "1"))
@@ -152,7 +153,7 @@ pub fn cardinality(q: &Query, aggregates: &Aggregates, text: &str) -> (Cardinali
     match q.body.as_ref() {
         SetExpr::Query(inner) if limit.is_none() && !fills(q) => cardinality(inner, aggregates, text),
         SetExpr::Select(s) => {
-            let Some((calls, bare)) = one_row_shape(s) else { return unbounded("nothing bounds its rows to one: a ClickHouse table has no unique key, so only LIMIT 1 or an aggregate with no GROUP BY does") };
+            let Some((calls, bare)) = one_row_shape(s) else { return unbounded(NO_BOUND) };
             if has_word(text, "arrayjoin") || fills(q) {
                 return unbounded("arrayJoin and WITH FILL make rows of their own");
             }
@@ -161,7 +162,7 @@ pub fn cardinality(q: &Query, aggregates: &Aggregates, text: &str) -> (Cardinali
                 (true, None) => (Cardinality::One, None),
                 // A limit of zero rows, or an offset past the one row.
                 (true, Some(_)) => (Cardinality::AtMostOne, None),
-                (false, _) => unbounded("nothing bounds its rows to one: a ClickHouse table has no unique key, so only LIMIT 1 or an aggregate with no GROUP BY does"),
+                (false, _) => unbounded(NO_BOUND),
             }
         }
         _ => unbounded("nothing bounds its rows to one"),
@@ -202,31 +203,24 @@ pub fn targets(statement: &Statement) -> Option<Vec<ResultTarget>> {
 /// The tables of the session's database the statement reads and writes, for the freshness facts:
 /// each named with no database before it, and no WITH query's name.
 pub fn tables(statement: &Statement) -> Tables {
+    fn named(q: &Query, ctes: &mut HashSet<String>) {
+        ctes.extend(q.with.iter().flat_map(|w| &w.cte_tables).map(|cte| cte.alias.name.value.clone()));
+    }
     let mut ctes: HashSet<String> = HashSet::new();
     let _ = sqlparser::ast::visit_statements(statement, |s| {
         if let Statement::Query(q) = s {
-            for cte in q.with.iter().flat_map(|w| &w.cte_tables) {
-                ctes.insert(cte.alias.name.value.clone());
-            }
+            named(q, &mut ctes);
         }
         ControlFlow::<()>::Continue(())
     });
     let _ = sqlparser::ast::visit_expressions(statement, |e| {
         if let Expr::Subquery(q) | Expr::Exists { subquery: q, .. } | Expr::InSubquery { subquery: q, .. } = e {
-            for cte in q.with.iter().flat_map(|w| &w.cte_tables) {
-                ctes.insert(cte.alias.name.value.clone());
-            }
+            named(q, &mut ctes);
         }
         ControlFlow::<()>::Continue(())
     });
-    let write: Vec<String> = match statement {
-        Statement::Insert(i) => match &i.table {
-            TableObject::TableName(name) => match parts(name).as_slice() {
-                [table] => vec![table.clone()],
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        },
+    let write: Vec<String> = match insert(statement) {
+        Some(Insert { table, .. }) if table.len() == 1 => table,
         _ => Vec::new(),
     };
     let mut read: Vec<String> = Vec::new();

@@ -22,7 +22,7 @@
 // the server (ClickHouse 26.8): a value that stands alone is escaped as a tab-separated value is,
 // NULL is `\N`, and a value inside an array, a tuple or a map is written as a literal, a string
 // quoted and a number bare.
-import { DecodeError, describe, ParameterError } from "./values.ts";
+import { daysFromCivil, DecodeError, describe, ParameterError } from "./values.ts";
 import { bareName, type EngineType } from "./engine-type.ts";
 import type { Columns } from "./values.ts";
 import { namesInResult, rowOf } from "./row.ts";
@@ -71,6 +71,9 @@ function readsSource(): boolean {
 /** An integer a double does not hold exactly, from its digits. */
 const exactIntegers = ((_key: string, v: unknown, context?: { source?: string }) => (typeof v === "number" && !Number.isSafeInteger(v) && context?.source !== undefined && /^-?\d+$/.test(context.source) ? BigInt(context.source) : v)) as (key: string, v: unknown) => unknown;
 
+/** An integer written in sixteen digits or more, the fewest of one a double does not hold exactly: with none in a result's text, plain `JSON.parse` reads it as the reviver would. */
+const WIDE = /(?<![\d.])\d{16,}(?![\d.eE])/;
+
 /** Whether a column of this kind may hold a JSON document: a JSON column's, and one the module has no kind for (a Tuple, a Map, a Variant). */
 const mayHoldJson = (kind: string) => /^(?:json|unknown)(?:\[\])*$/.test(kind);
 
@@ -97,13 +100,16 @@ export async function runClickhouse(c: ClickhouseClient, text: string, params: r
   }
   const fromText = readsSource() && (columns === undefined || columns.some(([, kind]) => mayHoldJson(kind)));
   const result = await c.query({ query: text, format: "JSONCompact", clickhouse_settings: { ...OUTPUT, output_format_json_quote_64bit_integers: fromText ? 0 : 1, ...bound } });
-  const body = (fromText ? JSON.parse(await result.text(), exactIntegers) : await result.json()) as { meta?: { name: string; type: string }[]; data?: unknown[][]; exception?: unknown } | null;
+  const json = fromText ? await result.text() : undefined;
+  // Whether the reviver may have read an integer as a BigInt, inside a document too.
+  const exact = json !== undefined && WIDE.test(json);
+  const body = (json === undefined ? await result.json() : JSON.parse(json, exact ? exactIntegers : undefined)) as { meta?: { name: string; type: string }[]; data?: unknown[][]; exception?: unknown } | null;
   if (typeof body?.exception === "string") throw inResult(body.exception);
   if (body === null || typeof body !== "object" || !Array.isArray(body.meta) || !Array.isArray(body.data)) {
     throw new DecodeError(`ClickHouse answered with ${describe(body)}, which is no JSONCompact result: a result has its columns under "meta" and its rows under "data".`);
   }
   const names = namesInResult(columns?.map(([name]) => name) ?? body.meta.map((m) => m.name), body.meta.map((m) => m.name));
-  const decoders = body.meta.map((m) => decoderOf(m.type));
+  const decoders = body.meta.map((m) => decoderOf(m.type, exact));
   // Each row by Reylo's row builder (src/row.ts): a column named `__proto__` is an own property.
   const build = rowOf(names);
   const decoded = new Array<unknown>(names.length);
@@ -151,8 +157,7 @@ function write(t: EngineType | undefined, v: unknown, name: string, inside: bool
       return n >= min && n <= max ? n.toString() : refuse(`${label(t)}, which holds ${min} to ${max}`);
     }
     case "float":
-      if (typeof v === "number") return Number.isNaN(v) ? "nan" : v === Infinity ? "inf" : v === -Infinity ? "-inf" : String(v);
-      return typeof v === "bigint" ? String(v) : refuse(`${label(t)}, which takes a number`);
+      return typeof v === "number" ? float(v) : typeof v === "bigint" ? String(v) : refuse(`${label(t)}, which takes a number`);
     case "decimal":
       if (typeof v === "bigint" || (typeof v === "number" && Number.isFinite(v))) return String(v);
       return typeof v === "string" && /^\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?\s*$/i.test(v) ? v.trim() : refuse(`${label(t)}, which takes its digits as a string, or a number`);
@@ -197,7 +202,6 @@ function element(t: EngineType, nullable: boolean, v: unknown, name: string, at:
 function key(t: EngineType, k: unknown, name: string, at: string): string {
   const where = `${at}[${JSON.stringify(k)}]`;
   if (typeof k !== "string") return write(t, k, name, true, where);
-  if (t.kind === "integer" || t.kind === "decimal") return write(t, k, name, true, where);
   if (t.kind === "float") return write(t, k === "nan" ? NaN : k === "inf" ? Infinity : k === "-inf" ? -Infinity : Number(k), name, true, where);
   if (t.kind === "boolean" && (k === "true" || k === "false")) return k;
   return write(t, k, name, true, where);
@@ -206,13 +210,19 @@ function key(t: EngineType, k: unknown, name: string, at: string): string {
 /** A value of a type the format does not structure (a Tuple of unnamed elements, a Variant, an Interval), written by what it is. */
 function plain(v: unknown, inside: boolean, refuse: (what: string) => never): string {
   if (typeof v === "string") return inside ? quoted(v) : escaped(v);
-  if (typeof v === "number") return Number.isNaN(v) ? "nan" : v === Infinity ? "inf" : v === -Infinity ? "-inf" : String(v);
+  if (typeof v === "number") return float(v);
   if (typeof v === "bigint" || typeof v === "boolean") return String(v);
   if (Array.isArray(v)) return `[${v.map((e) => (e === null || e === undefined ? "NULL" : plain(e, true, refuse))).join(",")}]`;
   return refuse("of a type Reylo writes a string, a number, a BigInt, a boolean or an array of them for");
 }
 
 const label = (t: EngineType) => bareName(t) || t.kind;
+
+/** A number as ClickHouse reads a float: NaN and the infinities by their names. */
+const float = (v: number) => (Number.isNaN(v) ? "nan" : v === Infinity ? "inf" : v === -Infinity ? "-inf" : String(v));
+
+/** The floats JSON has no number for, by the name a result writes each with. */
+export const NON_FINITE: ReadonlyMap<unknown, number> = new Map([["nan", NaN], ["-nan", NaN], ["inf", Infinity], ["+inf", Infinity], ["-inf", -Infinity]]);
 
 const INSTANT = /^\s*(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d)(?::(\d\d)(?:[.,](\d{1,9}))?)?\s*(?:(Z)|([+-])(\d\d)(?::?(\d\d))?)\s*$/i;
 
@@ -229,8 +239,7 @@ function instant(t: EngineType & { kind: "instant" }, v: string, inside: boolean
   const [year, month, day, hour, minute, second] = [m[1], m[2], m[3], m[4], m[5], m[6] ?? "0"].map(Number) as [number, number, number, number, number, number];
   if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return refuse(`${label(t)}, an instant, and this is no date and time`);
   const offset = m[8] === undefined ? (m[9] === "-" ? -1 : 1) * (Number(m[10]) * 3600 + Number(m[11] ?? "0") * 60) : 0;
-  // Date.UTC reads a year under 100 as one of the 1900s: 400 years on, the calendar is the same.
-  const seconds = Date.UTC(year + 400, month - 1, day, hour, minute, second) / 1000 - 12622780800 - offset;
+  const seconds = daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second - offset;
   const fraction = m[7] ?? "";
   const whole = bareName(t) !== "DateTime64";
   if (whole) {
@@ -266,15 +275,20 @@ const document: Decoder = (v) => {
   return v;
 };
 
-const decoders = new Map<string, Decoder>();
+/** Each type's decoder, for a result read as it is and for one whose integers the reviver read (`exact`). */
+const decoders = { plain: new Map<string, Decoder>(), exact: new Map<string, Decoder>() };
 
-/** The decoder of a ClickHouse type, by its name as a result writes it (`Array(Nullable(Int64))`). */
-function decoderOf(type: string): Decoder {
-  let found = decoders.get(type);
+/**
+ * The decoder of a ClickHouse type, by its name as a result writes it (`Array(Nullable(Int64))`).
+ * `exact` says the result's integers past 2^53 are BigInts, which a document's are turned back from.
+ */
+function decoderOf(type: string, exact: boolean): Decoder {
+  const cache = exact ? decoders.exact : decoders.plain;
+  let found = cache.get(type);
   if (found === undefined) {
-    found = build(type);
+    found = build(type, exact);
     // A statement's types are few; a type written with a value in it (an Enum's labels) is one more each.
-    if (decoders.size < 4096) decoders.set(type, found);
+    if (cache.size < 4096) cache.set(type, found);
   }
   return found;
 }
@@ -309,15 +323,15 @@ function tupleElement(text: string): { name?: string; type: string } {
   return { name: m[1] !== undefined ? m[1].replace(/\\([\s\S])/g, "$1") : m[2]!, type: m[3]! };
 }
 
-function build(type: string): Decoder {
+function build(type: string, exact: boolean): Decoder {
   const { name, args } = parts(type);
   switch (name) {
     case "Nullable":
     case "LowCardinality":
       // NULL is JSON's null, which every decoder below leaves as it is.
-      return args.length === 1 ? decoderOf(args[0]!) : same;
+      return args.length === 1 ? decoderOf(args[0]!, exact) : same;
     case "SimpleAggregateFunction":
-      return args.length ? decoderOf(args[args.length - 1]!) : same;
+      return args.length ? decoderOf(args[args.length - 1]!, exact) : same;
     case "Int64": case "Int128": case "Int256": case "UInt64": case "UInt128": case "UInt256":
       return (v, column) => {
         if (v === null) return null;
@@ -328,16 +342,16 @@ function build(type: string): Decoder {
       };
     case "Float32": case "Float64": case "BFloat16":
       // A float with no fraction is written as an integer, which may have been read as one.
-      return (v) => (typeof v === "bigint" ? Number(v) : typeof v !== "string" ? v : v === "nan" || v === "-nan" ? NaN : v === "inf" || v === "+inf" ? Infinity : v === "-inf" ? -Infinity : Number(v));
+      return (v) => (typeof v === "bigint" ? Number(v) : typeof v !== "string" ? v : (NON_FINITE.get(v) ?? Number(v)));
     case "JSON": case "Object": case "Dynamic": case "Variant":
-      return document;
+      return exact ? document : same;
     case "Decimal": case "Decimal32": case "Decimal64": case "Decimal128": case "Decimal256":
       return (v) => (typeof v === "number" ? String(v) : v);
     case "Nothing":
       return () => null;
     case "Array": {
       if (args.length !== 1) return same;
-      const inner = decoderOf(args[0]!);
+      const inner = decoderOf(args[0]!, exact);
       if (inner === same) return same;
       return (v, column) => {
         if (Array.isArray(v)) for (let i = 0; i < v.length; i++) v[i] = inner(v[i], column);
@@ -347,7 +361,7 @@ function build(type: string): Decoder {
     case "Tuple":
     case "Nested": {
       const elements = args.map(tupleElement);
-      const inner = elements.map((e) => decoderOf(e.type));
+      const inner = elements.map((e) => decoderOf(e.type, exact));
       const tuple: Decoder = inner.every((d) => d === same)
         ? same
         : (v, column) => {
@@ -370,7 +384,7 @@ function build(type: string): Decoder {
     }
     case "Map": {
       if (args.length !== 2) return same;
-      const inner = decoderOf(args[1]!);
+      const inner = decoderOf(args[1]!, exact);
       if (inner === same) return same;
       return (v, column) => {
         if (v !== null && typeof v === "object" && !Array.isArray(v)) {

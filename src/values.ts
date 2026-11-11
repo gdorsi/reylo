@@ -397,7 +397,7 @@ const micros = (fraction: string) => (fraction === "" ? ".000000" : fraction.pad
 const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
 
 /** Days from 1970-01-01 to a date of the proleptic Gregorian calendar, year 0 being 1 BC (Howard Hinnant's days_from_civil). */
-function daysFromCivil(y: number, m: number, d: number): number {
+export function daysFromCivil(y: number, m: number, d: number): number {
   y -= m <= 2 ? 1 : 0;
   const era = Math.floor(y / 400);
   const yoe = y - era * 400;

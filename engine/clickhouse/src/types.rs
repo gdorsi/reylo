@@ -12,7 +12,7 @@
 //! the format does not structure (a `Tuple` whose elements have no names, a `Variant`, a `Dynamic`,
 //! an `Interval`, a geometric type, an aggregate function's state) is opaque.
 
-use reylo_engine_core::types::{ArrayType, Bounds, DateType, DecimalType, Field, FloatType, IllFormed, InstantType, IntegerType, Kind, MapType, Position, Size, TextType, Type};
+use reylo_engine_core::types::{Bounds, DateType, DecimalType, Field, FloatType, IllFormed, InstantType, IntegerType, Kind, MapType, Position, Size, TextType, Type};
 
 /// A type as ClickHouse writes it: its name and what stands in its parentheses.
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +219,18 @@ fn decimal(precision: u32, scale: Option<i32>) -> Type {
     Type::decimal(DecimalType { precision: Some(precision), min_scale: scale, max_scale: scale, ..DecimalType::default() })
 }
 
+/// A Tuple's or a Nested's elements as a record's fields, where every one is named and there is one.
+fn fields(args: &[Arg]) -> Option<Vec<Field>> {
+    let fields: Vec<Field> = args.iter().map(|a| match a {
+        Arg::Field(name, ty) => {
+            let position = of_written(ty);
+            Some(Field::new(name.clone(), position.ty, position.nullable))
+        }
+        _ => None,
+    }).collect::<Option<_>>()?;
+    (!fields.is_empty()).then_some(fields)
+}
+
 /// ClickHouse's `String`, and a `FixedString` of `size` bytes: bytes meant as UTF-8, never validated.
 fn string(size: Option<u64>) -> Type {
     Type::new(Kind::Text(TextType { ill_formed: Some(IllFormed::Utf8), size: size.map(Size::exact), ..TextType::default() }))
@@ -327,34 +339,16 @@ pub fn of_written(t: &Written) -> Position {
             Some(element) => Position::non_null(Type::array(of_written(element))),
             None => unread(),
         },
-        "Tuple" => {
-            let fields: Option<Vec<Field>> = t.args.iter().map(|a| match a {
-                Arg::Field(name, ty) => {
-                    let position = of_written(ty);
-                    Some(Field::new(name.clone(), position.ty, position.nullable))
-                }
-                _ => None,
-            }).collect();
-            match fields {
-                Some(fields) if !fields.is_empty() => Position::non_null(Type::record(fields)),
-                // Elements with no names: no type of the format describes one.
-                _ => Position::non_null(Type::opaque("Tuple")),
-            }
-        }
+        "Tuple" => match fields(&t.args) {
+            Some(fields) => Position::non_null(Type::record(fields)),
+            // Elements with no names: no type of the format describes one.
+            None => Position::non_null(Type::opaque("Tuple")),
+        },
         // Each row of a nested table, as a record of its columns.
-        "Nested" => {
-            let fields: Option<Vec<Field>> = t.args.iter().map(|a| match a {
-                Arg::Field(name, ty) => {
-                    let position = of_written(ty);
-                    Some(Field::new(name.clone(), position.ty, position.nullable))
-                }
-                _ => None,
-            }).collect();
-            match fields {
-                Some(fields) if !fields.is_empty() => Position::non_null(Type::new(Kind::Array(ArrayType { element: Box::new(Position::non_null(Type::record(fields))), size: None, any_depth: false }))),
-                _ => unread(),
-            }
-        }
+        "Nested" => match fields(&t.args) {
+            Some(fields) => Position::non_null(Type::array(Position::non_null(Type::record(fields)))),
+            None => unread(),
+        },
         "Map" => match (inner(&t.args, 0), inner(&t.args, 1)) {
             (Some(key), Some(value)) => Position::non_null(Type::new(Kind::Map(MapType { key: Box::new(of_written(key).ty), value: Box::new(of_written(value)) }))),
             _ => unread(),

@@ -78,11 +78,6 @@ fn cast_after(sql: &str, end: usize) -> Option<String> {
     Some(sql[start..i].to_string())
 }
 
-/// A type's text as a ClickHouse string literal: a backslash and a quote escaped.
-fn literal(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
 /// The parameter's number, as the statement binds it: its place in the binding order, from 1.
 fn number(lexed: &Lexed, name: &str) -> usize {
     lexed.params.iter().position(|p| p == name).map_or(0, |i| i + 1)
@@ -100,7 +95,7 @@ pub fn rewritten(sql: &str, lexed: &Lexed, types: &dyn Fn(&str) -> Option<String
 /// The statement as the engine describes it: a value of each parameter's type in its place.
 pub fn probe(sql: &str, lexed: &Lexed, types: &dyn Fn(&str) -> Option<String>) -> Rewritten {
     lex::rewrite_with(sql, lexed, Target::Dollar, &|name, rendered| match types(name) {
-        Some(ty) => format!("defaultValueOfTypeName({})", literal(&ty)),
+        Some(ty) => format!("defaultValueOfTypeName({})", crate::catalog::literal(&ty)),
         None => rendered.to_string(),
     })
 }

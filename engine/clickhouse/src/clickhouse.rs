@@ -119,17 +119,7 @@ fn quoted_names(message: &str) -> Vec<&str> {
 
 /// Whether the statement's code starts with a parenthesis, past its leading space and comments.
 fn parenthesized(sql: &str, lexed: &Lexed) -> bool {
-    let b = sql.as_bytes();
-    let mut i = 0;
-    loop {
-        while b.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
-        }
-        match lexed.opaque.iter().find(|&&(start, _)| start == i && matches!(b[start], b'-' | b'/' | b'#')) {
-            Some(&(_, end)) => i = end,
-            None => return b.get(i) == Some(&b'('),
-        }
-    }
+    sql[lex::past_comments(sql, lexed, 0)..].starts_with('(')
 }
 
 /// A statement as the server was given it: the described text, where it starts in the whole
@@ -218,53 +208,48 @@ pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
 
     // An INSERT's table, whose columns type the parameters its VALUES list writes whole.
     let written = if insert { parsed.as_ref().and_then(rows::insert) } else { None };
-    let table = match &written {
-        Some(w) => Some(catalog::columns(host, &w.table)),
-        None => None,
-    };
+    // Asked with whatever else this round asks.
+    let table = written.as_ref().map(|w| catalog::columns(host, &w.table));
     let mut select_width = None;
-    if let (Some(w), Some(columns)) = (&written, &table) {
-        // Asked with whatever else this round asks.
-        if let Some(columns) = columns {
-            let name = w.table.join(".");
-            let named = |n: &str| word_at(sql, &lexed, n).map_or((0, sql.trim_end().len()), |at| (at, n.len()));
-            if columns.is_empty() {
-                let (start, length) = named(w.table.last().map(String::as_str).unwrap_or_default());
-                return failed(vec![Diagnostic { message: format!("ClickHouse has no table {name}"), start, length: length.max(1), code: REFUSED, server_code: Some("60".into()) }]);
-            }
-            let targets: Vec<&TableColumn> = if w.columns.is_empty() {
-                columns.iter().filter(|c| c.written).collect()
-            } else {
-                let mut found = Vec::new();
-                for column in &w.columns {
-                    match columns.iter().find(|c| &c.name == column) {
-                        Some(c) => found.push(c),
-                        None => {
-                            let (start, length) = named(column);
-                            diagnostics.push(Diagnostic { message: format!("The table {name} has no column {column}"), start, length: length.max(1), code: REFUSED, server_code: Some("16".into()) });
-                        }
+    if let (Some(w), Some(Some(columns))) = (&written, &table) {
+        let name = w.table.join(".");
+        let named = |n: &str| word_at(sql, &lexed, n).map_or((0, sql.trim_end().len()), |at| (at, n.len()));
+        if columns.is_empty() {
+            let (start, length) = named(w.table.last().map(String::as_str).unwrap_or_default());
+            return failed(vec![Diagnostic { message: format!("ClickHouse has no table {name}"), start, length: length.max(1), code: REFUSED, server_code: Some("60".into()) }]);
+        }
+        let targets: Vec<&TableColumn> = if w.columns.is_empty() {
+            columns.iter().filter(|c| c.written).collect()
+        } else {
+            let mut found = Vec::new();
+            for column in &w.columns {
+                match columns.iter().find(|c| &c.name == column) {
+                    Some(c) => found.push(c),
+                    None => {
+                        let (start, length) = named(column);
+                        diagnostics.push(Diagnostic { message: format!("The table {name} has no column {column}"), start, length: length.max(1), code: REFUSED, server_code: Some("16".into()) });
                     }
                 }
-                found
-            };
-            if !diagnostics.is_empty() {
-                return failed(diagnostics);
             }
-            for row in w.values.iter().flatten() {
-                if row.len() != targets.len() {
-                    return whole(format!("The INSERT writes {} column{} of {name} and a row of its VALUES has {} value{}", targets.len(), if targets.len() == 1 { "" } else { "s" }, row.len(), if row.len() == 1 { "" } else { "s" }), REFUSED);
+            found
+        };
+        if !diagnostics.is_empty() {
+            return failed(diagnostics);
+        }
+        for row in w.values.iter().flatten() {
+            if row.len() != targets.len() {
+                return whole(format!("The INSERT writes {} column{} of {name} and a row of its VALUES has {} value{}", targets.len(), if targets.len() == 1 { "" } else { "s" }, row.len(), if row.len() == 1 { "" } else { "s" }), REFUSED);
+            }
+            for (value, column) in row.iter().zip(&targets) {
+                let Some(k) = value.and_then(|n| n.checked_sub(1)).filter(|k| *k < stated.len()) else { continue };
+                if stated[k].is_none() {
+                    stated[k] = Some(column.ty.clone());
                 }
-                for (value, column) in row.iter().zip(&targets) {
-                    let Some(k) = value.and_then(|n| n.checked_sub(1)).filter(|k| *k < stated.len()) else { continue };
-                    if stated[k].is_none() {
-                        stated[k] = Some(column.ty.clone());
-                    }
-                    comments[k] = column.comment.clone();
-                }
+                comments[k] = column.comment.clone();
             }
-            if w.selects {
-                select_width = Some((targets.len(), name));
-            }
+        }
+        if w.selects {
+            select_width = Some((targets.len(), name));
         }
     }
 
@@ -325,7 +310,7 @@ pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
         if let Err(mut e) = answer? {
             // The position is in the text after `EXPLAIN AST `, which the statement starts after.
             e.position = e.position.and_then(|p| p.checked_sub("EXPLAIN AST ".len()));
-            return Some(refused(sql, &lexed, &Given { rewritten: &probe, start: 0 }, &e, command));
+            return Some(refused(sql, &lexed, &given, &e, command));
         }
     }
 

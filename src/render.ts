@@ -61,6 +61,9 @@ export const orNull = (type: string) => (type === JSON_TYPE || type === JSON_INP
 
 export const ident = (name: string) => (/^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name));
 
+/** A record as an object of its fields, each by `render` and `| null` where it may be NULL. */
+const fieldsObject = (fields: readonly Field[], render: (type: EngineType) => string) => (fields.length ? `{ ${fields.map((f) => `${ident(f.name)}: ${f.nullable ? orNull(render(f.type)) : render(f.type)}`).join("; ")} }` : "Record<never, never>");
+
 /**
  * The TypeScript of a value inside a document the database built, typed by the SQL value it was
  * written from, as the database writes that value in there (the spec's facts on what each database
@@ -142,12 +145,10 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
         return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${orNull(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
       }
       // A ClickHouse Tuple of named elements is an object of them, each NULL where its type says so.
-      if (dialect === "clickhouse") {
-        return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
-      }
+      if (dialect === "clickhouse") return fieldsObject(lastOfEachName(t.fields), (f) => renderType(f, false, dialect, codecs));
       // A Postgres row value, and a geometric type, is an object of its fields, each as a column
       // of its type is (src/values.ts).
-      if (dialect === "postgres") return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
+      if (dialect === "postgres") return fieldsObject(t.fields, (f) => renderType(f, false, dialect, codecs));
       break;
     // A JSON value: what the statement built, the values a schema admits, or any JSON.
     case "json":
@@ -390,7 +391,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
     const part = (p: { type: EngineType; nullable?: boolean }) => (p.nullable ? orNull : (x: string) => x)(renderParamType(p.type, dialect, true, undefined, codecs));
     if (t.kind === "integer") return kind === "int8" ? "number | bigint | string" : "number";
     if (t.kind === "decimal") return "string | number";
-    if (t.kind === "record") return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${part(f)}`).join("; ")} }` : "Record<never, never>";
+    if (t.kind === "record") return fieldsObject(t.fields, (f) => renderParamType(f, dialect, true, undefined, codecs));
     if (t.kind === "map") return `Readonly<Record<string, ${t.value.nullable ? orNull(renderParamType(t.value.type, dialect, true)) : renderParamType(t.value.type, dialect, true)}>>`;
     if (t.kind === "array") {
       const inner = part(t.element);
@@ -423,7 +424,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
   // takes it, null where the field may be; a geometric type the object it returns.
   if (dialect === "postgres" && t.kind === "record" && members === undefined && kind !== "text") {
     if (!isRowKind(kind)) return renderType(t, false, dialect, codecs);
-    return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderParamType(f.type, dialect, true, undefined, codecs))}`).join("; ")} }` : "Record<never, never>";
+    return fieldsObject(t.fields, (f) => renderParamType(f, dialect, true, undefined, codecs));
   }
   if (dialect !== "sqlite") {
     if (kind === "int8") return "number | bigint | string";
